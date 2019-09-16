@@ -1,0 +1,337 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+import sys
+import os
+import string
+import time
+import threading
+from pysnmpclass import snmpclass
+from oraclass import ORA
+
+#cm_rxpwr_mib  = '.1.3.6.1.2.1.10.127.1.1.1.1.6.3'  CM  DSPower.3 CM下行
+#dlsnr_mib     = '.1.3.6.1.2.1.10.127.1.1.4.1.5.3'  CM  SignalNoise.3
+#cm_txpwr_mib  = '.1.3.6.1.2.1.10.127.1.2.2.1.3.2'  CM  CmStatusTxPower.2 CMTS下行=CM上行
+#cm_t3_mib     = '.1.3.6.1.2.1.10.127.1.2.2.1.12.2' CM  CmStatusT3Timeouts.2
+#cm_t4_mib     = '.1.3.6.1.2.1.10.127.1.2.2.1.13.2' CM  CmStatusT4Timeouts.2
+#cmprofile_mib = '.1.3.6.1.2.1.69.1.4.5.0'          CM  CmConfigFile
+#cmip_mib      = '.1.3.6.1.2.1.10.127.1.3.3.1.3'    CmStatusIP
+#rxpwr_mib     = '.1.3.6.1.2.1.10.127.1.3.3.1.6'    CmStatusRxPower CMTS上行
+#cmstatus_mib  = '.1.3.6.1.2.1.10.127.1.3.3.1.9'    CmStatus
+#ulsnr_mib     = '.1.3.6.1.2.1.10.127.1.3.3.1.13'   CmStatusSignalNoise
+
+thread_cnt = 0
+status_arr = {}
+thread_arr = {}
+snmp_oid = {}
+mloop = 0
+
+def query_status(loop, cmidx, cmip, cmts_ip, cmts_snmp):
+    global snmp_oid, thread_cnt, status_arr
+    thread_cnt = thread_cnt+1
+    status_arr['DONE-'+str(loop)] = 0
+    try:
+        agt = snmpclass(version='v2c',community=cmts_snmp,ptimeout=1,pretries=3,debug=0)
+        agt_cm = snmpclass(version='v1',community='public',ptimeout=1,pretries=3,debug=0)
+        mib = "%s.%d" % (snmp_oid['CmStatus'], cmidx)
+        rets = agt.snmpget([cmts_ip, '-c', cmts_snmp, mib])
+        if rets is not None and rets[0][1]!='':
+            status_arr['STATUS-'+str(loop)] = int(rets[0][1])
+        else:
+            status_arr['STATUS-'+str(loop)] = -1
+
+        if status_arr['STATUS-'+str(loop)]==6:
+
+            if cmip is None or cmip=='-1':
+                try:
+                    mib = "%s.%d" % (snmp_oid['CmStatusIP'], cmidx)
+                    rets = agt.snmpget([cmts_ip, '-c', cmts_snmp, mib])
+                    if rets is not None and rets[0][1]!='':
+                        status_arr['CMIP-'+str(loop)] = rets[0][1]
+                    else:
+                        status_arr['CMIP-'+str(loop)] = None
+                except:
+                    status_arr['CMIP-'+str(loop)] = None
+                    pass
+            else:
+                status_arr['CMIP-'+str(loop)] = cmip
+
+            mib = "%s.%d" % (snmp_oid['CmStatusSignalNoise'], cmidx)
+            rets = agt.snmpget([cmts_ip, '-c', cmts_snmp, mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['ULSNR-'+str(loop)] = int(rets[0][1])/10.0
+            else:
+                status_arr['ULSNR-'+str(loop)] = -999
+
+            mib = "%s.%d" % (snmp_oid['CmStatusRxPower'], cmidx)
+            rets = agt.snmpget([cmts_ip, '-c', cmts_snmp, mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['RXPWR-'+str(loop)] = int(rets[0][1])/10.0
+            else:
+                status_arr['RXPWR-'+str(loop)] = -999
+
+            mib = "%s" % (snmp_oid['SignalNoise.3'])
+            rets = agt_cm.snmpget([cmip, '-c', 'public', mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['DLSNR-'+str(loop)] = int(rets[0][1])/10.0
+            else:
+                status_arr['DLSNR-'+str(loop)] = -999
+
+            mib = "%s" % (snmp_oid['DSPower.3'])
+            rets = agt_cm.snmpget([cmip, '-c', 'public', mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['CMRXPWR-'+str(loop)] = int(rets[0][1])/10.0
+            else:
+                status_arr['CMRXPWR-'+str(loop)] = -999
+
+            mib = "%s" % (snmp_oid['CmStatusTxPower.2'])
+            rets = agt_cm.snmpget([cmip, '-c', 'public', mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['CMTXPWR-'+str(loop)] = int(rets[0][1])/10.0
+            else:
+                status_arr['CMTXPWR-'+str(loop)] = -999
+
+            mib = "%s" % (snmp_oid['CmStatusT3Timeouts.2'])
+            rets = agt_cm.snmpget([cmip, '-c', 'public', mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['CMT3-'+str(loop)] = int(rets[0][1])
+            else:
+                status_arr['CMT3-'+str(loop)] = None
+
+            mib = "%s" % (snmp_oid['CmStatusT4Timeouts.2'])
+            rets = agt_cm.snmpget([cmip, '-c', 'public', mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['CMT4-'+str(loop)] = int(rets[0][1])
+            else:
+                status_arr['CMT4-'+str(loop)] = None
+
+            mib = "%s" % (snmp_oid['CmConfigFile'])
+            rets = agt_cm.snmpget([cmip, '-c', 'public', mib])
+            if rets is not None and rets[0][1]!='':
+                status_arr['PROFILE-'+str(loop)] = rets[0][1]
+            else:
+                status_arr['PROFILE-'+str(loop)] = 'X'
+        else:
+            status_arr['CMIP-'+str(loop)] = None
+            status_arr['ULSNR-'+str(loop)] = -999
+            status_arr['RXPWR-'+str(loop)] = -999
+            status_arr['DLSNR-'+str(loop)] = -999
+            status_arr['CMRXPWR-'+str(loop)] = -999
+            status_arr['CMTXPWR-'+str(loop)] = -999
+            status_arr['CMT3-'+str(loop)] = 0
+            status_arr['CMT4-'+str(loop)] = 0
+            status_arr['PROFILE-'+str(loop)] = 'X'
+
+    except Exception, msg:
+        print msg
+        status_arr['STATUS-'+str(loop)] = None
+        pass
+    thread_cnt = thread_cnt-1
+    status_arr['DONE-'+str(loop)] = 1
+
+def to_DB(loop):
+    global ora
+    try:
+        SQL = ''
+        try:
+            cm_orgcmip = status_arr['ORGCMIP-'+str(loop)]
+        except:
+            cm_orgcmip = None
+        try:
+            cm_cmip = status_arr['CMIP-'+str(loop)]
+        except:
+            cm_cmip = None
+        try:
+            rxpwr = status_arr['RXPWR-'+str(loop)]
+        except:
+            rxpwr = -999
+        try:
+            cm_rxpwr = status_arr['CMRXPWR-'+str(loop)]
+        except:
+            cm_rxpwr = -999
+        try:
+            cm_txpwr = status_arr['CMTXPWR-'+str(loop)]
+        except:
+            cm_txpwr = -999
+        try:
+            dl_snr = status_arr['DLSNR-'+str(loop)]
+        except:
+            dl_snr = -999
+        try:
+            ul_snr = status_arr['ULSNR-'+str(loop)]
+        except:
+            ul_snr = -999
+        try:
+            cm_t3 = status_arr['CMT3-'+str(loop)]
+            if cm_t3 is None:
+                cm_t3 = 0
+        except:
+            cm_t3 = 0
+        try:
+            cm_t4 = status_arr['CMT4-'+str(loop)]
+            if cm_t4 is None:
+                cm_t4 = 0
+        except:
+            cm_t4 = 0
+        try:
+            cm_profile = status_arr['PROFILE-'+str(loop)]
+        except:
+            cm_profile = 'X'
+        if status_arr['STATUS-'+str(loop)] is not None and status_arr['STATUS-'+str(loop)]==6:
+            if cm_profile=='X':
+                profile_sql = ''
+            else:
+                profile_sql = ",cm_config_file='%s'" % (cm_profile)
+            if cm_cmip is not None and cm_cmip!=cm_orgcmip:
+                #SQL = "update CMMAC set synctime=sysdate,status='%d',rxpwr='%.1f',cm_rxpwr='%.1f',cm_txpwr='%.1f',dl_snr='%.1f',ul_snr='%.1f',cm_t3='%d',cm_t4='%d',ip='%s' %s where companyno='%s' and cmts_id='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(loop)], rxpwr, cm_rxpwr, cm_txpwr, dl_snr, ul_snr, cm_t3, cm_t4, cm_cmip, profile_sql, status_arr['SO-'+str(loop)], status_arr['CMTS-'+str(loop)], status_arr['MAC-'+str(loop)])
+                SQL = "update CMMAC set synctime=trunc(sysdate,'MI'),status='%d',rxpwr='%.1f',cm_rxpwr='%.1f',cm_txpwr='%.1f',dl_snr='%.1f',ul_snr='%.1f',cm_t3='%d',cm_t4='%d',ip='%s' %s where companyno='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(loop)], rxpwr, cm_rxpwr, cm_txpwr, dl_snr, ul_snr, cm_t3, cm_t4, cm_cmip, profile_sql, status_arr['SO-'+str(loop)], status_arr['MAC-'+str(loop)])
+            else:
+                #SQL = "update CMMAC set synctime=sysdate,status='%d',rxpwr='%.1f',cm_rxpwr='%.1f',cm_txpwr='%.1f',dl_snr='%.1f',ul_snr='%.1f',cm_t3='%d',cm_t4='%d' %s where companyno='%s' and cmts_id='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(loop)], rxpwr, cm_rxpwr, cm_txpwr, dl_snr, ul_snr, cm_t3, cm_t4, profile_sql, status_arr['SO-'+str(loop)], status_arr['CMTS-'+str(loop)], status_arr['MAC-'+str(loop)])
+                SQL = "update CMMAC set synctime=trunc(sysdate,'MI'),status='%d',rxpwr='%.1f',cm_rxpwr='%.1f',cm_txpwr='%.1f',dl_snr='%.1f',ul_snr='%.1f',cm_t3='%d',cm_t4='%d' %s where companyno='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(loop)], rxpwr, cm_rxpwr, cm_txpwr, dl_snr, ul_snr, cm_t3, cm_t4, profile_sql, status_arr['SO-'+str(loop)], status_arr['MAC-'+str(loop)])
+            status_arr['STATUS-'+str(loop)] = None
+        elif status_arr['STATUS-'+str(loop)] is not None and status_arr['STATUS-'+str(loop)]!=6 and status_arr['STATUS-'+str(loop)]>0:
+            #SQL = "update CMMAC set synctime=sysdate,status='%d' where companyno='%s' and cmts_id='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(loop)], status_arr['SO-'+str(loop)], status_arr['CMTS-'+str(loop)], status_arr['MAC-'+str(loop)])
+            SQL = "update CMMAC set synctime=trunc(sysdate,'MI'),status='%d' where companyno='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(loop)], status_arr['SO-'+str(loop)], status_arr['MAC-'+str(loop)])
+            status_arr['STATUS-'+str(loop)] = None
+        elif status_arr['STATUS-'+str(loop)] is not None and status_arr['STATUS-'+str(loop)]<0:
+            #SQL = "update CMMAC set status=-1,synctime=sysdate where companyno='%s' and cmts_id='%s' and cmmac='%s'" % (status_arr['SO-'+str(loop)], status_arr['CMTS-'+str(loop)], status_arr['MAC-'+str(loop)])
+            SQL = "update CMMAC set status=-1,synctime=trunc(sysdate,'MI') where companyno='%s' and cmmac='%s'" % (status_arr['SO-'+str(loop)], status_arr['MAC-'+str(loop)])
+            status_arr['STATUS-'+str(loop)] = None
+        if SQL!='':
+            print str(loop) + ': ' + SQL
+            try:
+                ora.execone(SQL)
+                ora.commit()
+                #CSQL = "update cm_status set qos=decode(str_div(qos,'-',0,10),null,qos,str_div(qos,'-',0,10)) where cmmac='%s'" % (status_arr['MAC-'+str(loop)])
+                #ora_coss.execone(CSQL)
+            except Exception, msg:
+                nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                print '['+nowdate+']:'+str(msg)
+                pass
+        sys.stdout.flush()
+        ora.commit()
+        #ora_coss.commit()
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+']:'+str(msg)
+        pass
+    status_arr['DONE-'+str(loop)] = 2
+
+def to_DB_clear(loop):
+    global ora
+    try:
+        SQL = "update CMMAC set synctime=trunc(sysdate,'MI') where companyno='%s' and cmmac='%s'" % (status_arr['SO-'+str(loop)], status_arr['MAC-'+str(loop)])
+        try:
+            ora.execone(SQL)
+            ora.commit()
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print '['+nowdate+']:'+str(msg)
+            print SQL
+            print ''
+            pass
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+']:'+str(msg)
+        pass
+
+#ora_coss = ORA('coss/coss@nmsdb')
+ora = ORA('nms@cnis')
+if not ora.db:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '[' + nowdate + ']: Unable to connect to server [CNIS]'
+    sys.exit(0)
+
+
+# Get OID
+SQL = "select name,oid from snmp_oid where \
+       name in ('DSPower.3','SignalNoise.3','CmStatusTxPower.2','CmStatusT3Timeouts.2','CmStatusT4Timeouts.2', \
+                'CmConfigFile','CmStatusIP','CmStatusRxPower','CmStatus','CmStatusSignalNoise')"
+rst = ora.execall(SQL)
+if rst is not None and len(rst)>0:
+    for aw in rst:
+        try:
+            xname = aw[0]
+            xoid = aw[1]
+            snmp_oid[xname] = xoid
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print '['+nowdate+']:'+str(msg)
+else:
+    print "Error: SNMP_OID is empty"
+    if ora.db:
+        ora.se_close()
+    sys.exit(0)
+
+
+while 1:
+    #cmtssql = "select companyno,cmts_id,cmmac,cmts_ip,snmp_ro,idx,cmip from (select a.companyno,a.cmts_id,a.cmmac,b.ip cmts_ip,b.snmp_ro,a.idx,a.ip cmip from CMMAC a,CMTS b where a.cmts_id=b.cmts_id and (a.synctime<sysdate-0.8 or a.synctime is null) and a.synctime>sysdate-3 order by a.status desc,a.synctime) where rownum<251 order by cmmac"
+    #cmtssql = "select companyno,cmts_id,cmmac,cmts_ip,snmp_ro,idx,cmip from (select a.companyno,a.cmts_id,a.cmmac,b.ip cmts_ip,b.snmp_ro,a.idx,a.ip cmip from CMMAC a,CMTS b where a.cmts_id=b.cmts_id and a.companyno in ('101','103','104','300','701','500') and (a.synctime<sysdate-0.8 or a.synctime is null) and a.synctime>sysdate-3 order by a.status desc,a.synctime) where rownum<251 order by cmmac"
+    cmtssql = "select companyno,cmts_id,cmmac,cmts_ip,snmp_ro,idx,cmip,synctime from ( \
+                 select a.companyno,a.cmts_id,a.cmmac,b.ip cmts_ip,b.snmp_ro,a.idx,a.ip cmip,a.synctime from CMMAC a,CMTS b where a.cmts_id=b.cmts_id and \
+                 a.companyno in ('101','103','104','300','701','500') and a.idx > 0 and (a.synctime<sysdate-8/24 or a.synctime is null) order by a.synctime \
+               ) where rownum <= 250"
+    rs1 = ora.execall(cmtssql)
+    reclen = len(rs1)
+    mloop = 0
+    if rs1 is not None and reclen>0:
+        for aw in rs1:
+            try:
+                so = aw[0]
+                cmts_id  = aw[1]
+                cmmac = aw[2]
+                cmts_ip  = aw[3]
+                cmts_snmp = aw[4]
+                cm_idx  = int(aw[5])
+                cm_ip  = aw[6]
+                print so, cmmac, cm_ip
+            except:
+                pass
+                continue
+            status_arr['STATUS-'+str(mloop)] = None
+            status_arr['SO-'+str(mloop)] = so
+            status_arr['CMTS-'+str(mloop)] = cmts_id
+            status_arr['MAC-'+str(mloop)] = cmmac
+            status_arr['IP-'+str(mloop)] = cmts_ip
+            status_arr['SNMP-'+str(mloop)] = cmts_snmp
+            status_arr['ORGCMIP-'+str(mloop)] = cm_ip
+            status_arr['DONE-'+str(mloop)] = 0
+            thread_arr[mloop] = threading.Thread(target = query_status, args = (mloop, cm_idx, cm_ip, cmts_ip, cmts_snmp))
+            thread_arr[mloop].start()
+            mloop = mloop+1
+        sys.stdout.flush()
+    else:
+        break
+
+    time.sleep(2)
+    check_loop = 0
+    while mloop>0:
+        check_cnt = 0
+        i = 0
+        while i<mloop:
+            if status_arr['DONE-'+str(i)]==1:
+                to_DB(i)
+            if status_arr['DONE-'+str(i)]==2:
+                check_cnt = check_cnt+1
+            i = i+1
+        if check_cnt>=mloop:
+            print 'All clear....'
+            break
+        check_loop = check_loop+1
+        if check_loop>5:
+            print ''
+            print 'Timeout...break!!!'
+            i = 0
+            while i<mloop:
+                if status_arr['DONE-'+str(i)]==1:
+                    to_DB(i)
+                elif status_arr['DONE-'+str(i)]==0:
+                    to_DB_clear(i)
+                i = i+1
+            break
+        sys.stdout.flush()
+        time.sleep(3)
+    sys.stdout.flush()
+
+if ora.db:
+    ora.se_close()
+sys.exit(0)

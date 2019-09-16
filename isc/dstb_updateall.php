@@ -1,0 +1,115 @@
+<?php
+  /*
+    請使用UTF-8 without BOM編碼
+    0 未收
+    1 正常
+    2 停機
+    3 已拆
+    4 註銷
+    5 促銷中
+    6 裝機中
+    7 待拆中
+    8 欠費中
+    9 移機中
+    A 已關機
+    B 待關機
+  */
+  include_once('common.inc.php');
+
+  $now = date("Y-m-d H:i:s");
+  echo "START: $now\n";
+
+  $today = date("Ymd");
+  $soisc = array();
+
+  $ora = GetDBH('CNIS');
+  $msoAry = array('TFM'=>'TFMCossMS','KBRO'=>'kbroCossMS','CG'=>'CossMS_CG');
+
+
+  foreach ($msoAry as $mso=>$conn){
+
+    $dbh = GetDBH($conn,'return');
+
+    if (stristr($dbh, 'error') || empty($dbh)) {
+      echo "$dbh\n";
+      continue;
+    }
+
+    $myd = GetDBH('ISC_M','','return');
+    if (stristr($myd, 'error') || empty($myd)) {
+      echo "$myd\n";
+      continue;
+    }
+
+
+    $sql = "select
+            b.companyno,b.subsid,b.servicename,b.custstatus,substring(b.custstatus,1,1) custstatus2,b.singlesn,b.packagename,b.billitem,z.actdate,z.oldpackage,z.oldcharge,z.newpackage,z.newcharge,b.swversion
+            from ms0102 a with (nolock)
+            inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A','B') and substring(b.servicename,1,1) = '3' and b.singlesn is not null and b.singlesn <> ''
+            left join (
+              select x.companyno,x.subsid,x.msflag,convert(varchar(8),x.startdate,112) startdate,case when x.actdate is not null and x.actdate <> '' then convert(varchar(8),x.actdate,112) else convert(varchar(8),x.startdate,112) end actdate,x.oldpackage,x.oldcharge,x.newpackage,x.newcharge
+              from ms0216 x with (nolock)
+              inner join (
+                select m.companyno,m.subsid,max(m.recvno) recvno from ms0216 m with (nolock)
+                inner join ms0200 n with (nolock) on n.companyno=m.companyno and n.subsid=m.subsid and substring(n.custstatus,1,1) in ('0','1','2','6','7','8','9','A','B') and substring(n.servicename,1,1) = '3' and n.singlesn is not null and n.singlesn <> ''
+                 group by m.companyno,m.subsid
+              ) y on y.companyno=x.companyno and y.subsid=x.subsid and y.recvno=x.recvno
+              where  x.msflag in ('1 正常','3 原價升級')
+            ) z on z.companyno=b.companyno and z.subsid=b.subsid
+            where  a.addrno='0'";
+    echo "$sql\n";
+    $sth = mssql_query($sql, $dbh);
+    while ($row = mssql_fetch_assoc($sth)) {
+      $row = strfilter($row);
+
+      $companyno = $row['companyno'];
+      $subsid = $row['subsid'];
+      $servicename = $row['servicename'];
+      $custstatus = $row['custstatus'];
+      $custstatus2 = $row['custstatus2'];
+      $singlesn = $row['singlesn'];
+      $packagename = $row['packagename'];
+      $billitem = $row['billitem'];
+      $actdate = $row['actdate'];
+      $oldpackage = $row['oldpackage'];
+      $oldcharge = $row['oldcharge'];
+      $newpackage = $row['newpackage'];
+      $newcharge = $row['newcharge'];
+      $swversion = $row['swversion'];
+
+
+      echo $companyno . ' ' . $subsid . ' ' . $custstatus . ' ' . $singlesn . ' ' . $packagename . ' ' . $billitem . ' ' . $qos . "\n";
+
+      if (!empty($packagename) && !empty($billitem) && !empty($oldpackage) && !empty($oldcharge) && !empty($newpackage) && !empty($newcharge)) {
+        if ($packagename == $oldpackage && $billitem == $oldcharge) { // 促案變更未過帳(現行方案=舊方案,現行收費=舊收費)
+          if ($today >= $actdate) { // 已生效
+            echo 'new: ' . $oldpackage . ' ' . $oldcharge . ' <' . $actdate . '> ' . $newpackage . ' ' . $newcharge . "\n";
+            $packagename = $newpackage;
+            $billitem    = $newcharge;
+          }
+        }
+        else if ($packagename == $newpackage && $billitem == $newcharge) { // 促案變更已過帳(現行方案=新方案,現行收費=新收費)
+          if ($actdate > $today) { // 未生效
+            echo 'old: ' . $oldpackage . ' ' . $oldcharge . ' <' . $actdate . '> ' . $newpackage . ' ' . $newcharge . "\n";
+            $packagename = $oldpackage;
+            $billitem    = $oldcharge;
+          }
+        }
+      }
+
+
+      $mysql = "replace into custdata_dstb (companyno,subsid,servicename,custstatus,singlesn,billitem,updatetime,swversion) values
+       ('$companyno','$subsid','$servicename','$custstatus','$singlesn','$billitem',now(),'$swversion')";
+      echo "$mysql\n";
+      mysql_query($mysql, $myd);
+    }
+
+    mssql_close($dbh);
+    mysql_close($myd);
+
+    echo "\n";
+  }
+
+  $now = date("Y-m-d H:i:s");
+  echo "END: $now\n";
+?>

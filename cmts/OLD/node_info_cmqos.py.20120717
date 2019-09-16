@@ -1,0 +1,238 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+import sys,datetime,time
+import pymssql
+from oraclass import ORA
+
+def OEMS_unity(so, node, reason, msg, alert):
+    if 1:
+        ora_oems = ORA('OEMS@KBRO_NMSDB')
+        if not ora_oems.db:
+            return -1
+
+        so_name = {}
+        oraqrysql = "select name,id from oems_mapping where type='OPERATOR' and name is not null"
+        rs = ora_oems.execall(oraqrysql)
+        if rs != None and len(rs) > 0:
+            for a_row in rs:
+                so_name[a_row[0]] = a_row[1]
+        node_info = "%s-%s" % (so, node)
+        #oraqrysql = "select sid,status from oems_tickets_main where type in (4115) and close_date is null and impact_list='%s'" % (node_info)
+        oraqrysql = "select sid,status from oems_tickets_main where type in (4301) and close_date is null and impact_list='%s'" % (node_info)
+        sid = -1
+        ostatus = 5110
+        rs = ora_oems.execall(oraqrysql)
+        if rs is not None and len(rs) > 0:
+            for a_row in rs:
+                sid = int(a_row[0])
+                ostatus = a_row[1]
+        print 'SID:',sid
+        if alert=='Y':
+            if sid<0:
+                #oraupdsql = "begin insert into oems_tickets_main(status,type,reason,descr,create_date,operator,account,normal_flag,impact_list,key,sub_key) values('5106',4115,'%s','%s',sysdate,'%s','CMTSMON','U','%s','3303','330305') return to_char(sid) into :1 ; end;" % (reason, msg, so_name[so], node_info)
+                oraupdsql = "begin insert into oems_tickets_main(status,type,reason,descr,create_date,operator,account,normal_flag,impact_list,key,sub_key) values('5110',4301,'%s','%s',sysdate,'%s','CMTSMON','I','%s','3303','330305') return to_char(sid) into :1 ; end;" % (reason, msg, so_name[so], node_info)
+                oems_sid_ary = ora_oems.db.BindingArray(1,12,'SQLT_STR')
+                ora_oems.c.execute(oraupdsql, oems_sid_ary)
+                sid = int(oems_sid_ary[0])
+                oraupdsql = "insert into oems_impact(sid,type,value,companyno,getimpactsubsid,result,node) values(%d,'NODE','%s','%s',sysdate,'OK','%s')" % (sid, node, so, node)
+                ora_oems.execone(oraupdsql)
+            oraupdsql = "insert into oems_tickets_log(sid,status_date,orig_status,status,descr,account) values(%d,sysdate,%d,%d,'%s','CMTSMON')" % (sid,ostatus,ostatus,msg)
+            print oraupdsql
+            ora_oems.execone(oraupdsql)
+            ora_oems.commit()
+        elif sid>0:
+            new_status = ostatus
+            if alert=='C':
+                SQL = "update oems_tickets_main set status=5105,close_date=sysdate where sid=%d and status in (5104)" % (sid)
+                print 'Close:',sid
+                ora_oems.execone(SQL)
+                new_status = 5105
+            oraupdsql = "insert into oems_tickets_log(sid,status_date,orig_status,status,descr,account) values(%d,sysdate,%d,%d,'%s','CMTSMON')" % (sid,ostatus,new_status,msg)
+            print oraupdsql
+            ora_oems.execone(oraupdsql)
+            ora_oems.commit()
+        if ora_oems.db:
+            ora_oems.se_close()
+        tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print "[%s]: %s" % (tme, msg)
+
+
+func = None
+if len(sys.argv)<2:
+    print 'Error: Argument error'
+    sys.exit(0)
+elif len(sys.argv)>=3:
+    func = sys.argv[2]
+
+so = sys.argv[1]
+
+oracon_upd = ORA('nms@cnis')
+if not oracon_upd.db:
+    sys.exit(0)
+
+
+# ulrcvpwr v1 RXPWR   CmStatusRxPower   CMTS上行接收功
+# dlrcvpwr v2 CMRXPWR DSPower.3         CM下行接收功率
+# cmulpwr  v3 CMTXPWR CmStatusTxPower.2 CM上行發射功率
+
+
+if func is None:
+###  CM cm_rxpwr
+    oraqrysql = "select companyno,node,sum(q_rxpwr) q_rxpwr,sum(q_cmrxpwr) q_cmrxpwr,sum(q_cmtxpwr) q_cmtxpwr,sum(q_dlsnr) q_dlsnr,sum(q_ulsnr) q_ulsnr,sum(q_t3) q_t3,sum(q_t4) q_t4 from v_cnis_cm_qos where companyno='%s' group by companyno,node" % (so)
+    tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print "[%s]" % (tme)
+    print oraqrysql
+    rs = oracon_upd.execall(oraqrysql)
+    if rs != None and len(rs) > 0:
+        for a_row in rs:
+            companyno = a_row[0]
+            nodeno = a_row[1]
+            q_rxpwr = int(a_row[2])
+            q_cmrxpwr = int(a_row[3])
+            q_cmtxpwr = int(a_row[4])
+            q_dlsnr = int(a_row[5])
+            q_ulsnr = int(a_row[6])
+            q_t3 = int(a_row[7])
+            q_t4 = int(a_row[8])
+            print companyno,nodeno,q_rxpwr,q_cmrxpwr,q_cmtxpwr,q_dlsnr,q_ulsnr,q_t3,q_t4
+
+            oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'RXPWR'); end;" % (companyno, nodeno, q_rxpwr)
+            try:
+                oracon_upd.execone(oraupdsql)
+            except Exception, detail:
+                print '%s -> %s' % (oraupdsql, detail)
+
+            oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'CMRXPWR'); end;" % (companyno, nodeno, q_cmrxpwr)
+            try:
+                oracon_upd.execone(oraupdsql)
+            except Exception, detail:
+                print '%s -> %s' % (oraupdsql, detail)
+
+            oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'CMTXPWR'); end;" % (companyno, nodeno, q_cmtxpwr)
+            try:
+                oracon_upd.execone(oraupdsql)
+            except Exception, detail:
+                print '%s -> %s' % (oraupdsql, detail)
+
+            oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'DLSNR'); end;" % (companyno, nodeno, q_dlsnr)
+            try:
+                oracon_upd.execone(oraupdsql)
+            except Exception, detail:
+                print '%s -> %s' % (oraupdsql, detail)
+
+            oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'ULSNR'); end;" % (companyno, nodeno, q_ulsnr)
+            try:
+                oracon_upd.execone(oraupdsql)
+            except Exception, detail:
+                print '%s -> %s' % (oraupdsql, detail)
+
+            oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'T3'); end;" % (companyno, nodeno, q_t3)
+            try:
+                oracon_upd.execone(oraupdsql)
+            except Exception, detail:
+                print '%s -> %s' % (oraupdsql, detail)
+
+            oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'T4'); end;" % (companyno, nodeno, q_t4)
+            try:
+                oracon_upd.execone(oraupdsql)
+            except Exception, detail:
+                print '%s -> %s' % (oraupdsql, detail)
+
+            oracon_upd.commit()
+    #oracon_upd.commit()
+
+if func is None:
+
+##  Checking QoS
+
+    node_arr = {}
+    node_cnt = 0
+    SQL = "select node,alert from node_info where companyno='%s' and monitor='Y' order by node" % (so)
+    print SQL
+    rs = oracon_upd.execall(SQL)
+    if rs != None and len(rs) > 0:
+        for a_row in rs:
+            node = a_row[0]
+            alert = a_row[1]
+            node_arr['A-'+node] = alert
+            node_arr['B-'+node] = 'N'
+            node_arr['NODE-'+str(node_cnt)] = node
+            node_cnt = node_cnt+1
+    else:
+        print "Empty node_info"
+
+    SQL = "select node,cm_cnt,abnormal_cm_cnt,q_rxpwr,q_cmrxpwr,q_cmtxpwr,q_dlsnr,q_ulsnr,q_t3,q_t4 from v_cnis_cm_qos_stat where companyno='%s'" % (so)
+    print SQL
+    rs = oracon_upd.execall(SQL)
+    if rs != None and len(rs) > 0:
+        for a_row in rs:
+            node = a_row[0]
+            cm_cnt = a_row[1]
+            abnormal_cm_cnt = a_row[2]
+            rxpwr = a_row[3]
+            cm_rxpwr = a_row[4]
+            cm_txpwr = a_row[5]
+            dlsnr = a_row[6]
+            ulsnr = a_row[7]
+            t3 = a_row[8]
+            t4 = a_row[9]
+
+            active_flag = 0
+            if cm_cnt>30 and (abnormal_cm_cnt*100/cm_cnt)>30:
+                active_flag = 1
+            elif abnormal_cm_cnt>30:
+                active_flag = 1
+            elif cm_cnt>30 and (abnormal_cm_cnt*100/cm_cnt)<10:
+                active_flag = 9
+            elif abnormal_cm_cnt<3:
+                active_flag = 9
+
+            if active_flag==1:
+                reason = "CM品質US-SNR異常(%s,%s)" % (so, node)
+                print so,node,cm_cnt,abnormal_cm_cnt
+                try:
+                    alert = node_arr['A-'+node]
+                except:
+                    print "array not found.(%s)" % ('A-'+node)
+                    alert = ''
+                    pass
+                if alert=='N':
+                    msg = "NODE(%s)所屬CM品質低於標準(CM總數:%d,不合格數:%d,RXPWR:%d,CMRXPWR:%d,CMTXPWR:%d,DSSNR:%d,USSNR:%d,T3:%d,T4:%d)" % (node,cm_cnt,abnormal_cm_cnt,rxpwr,cm_rxpwr,cm_txpwr,dlsnr,ulsnr,t3,t4)
+                    OEMS_unity(so, node, reason, msg, 'Y')
+                    SQL = "update node_info set alert='Y',alerttime=sysdate where companyno='%s' and node='%s'" % (so, node);
+                    oracon_upd.execone(SQL)
+                    oracon_upd.commit()
+                    node_arr['B-'+node] = 'Y'
+                elif alert=='Y':
+                    node_arr['B-'+node] = 'Y'
+            elif active_flag==9:
+                node_arr['B-'+node] = 'C'
+
+            sys.stdout.flush()
+
+    for i in range(0, node_cnt):
+        node = node_arr['NODE-'+str(i)]
+        reason = "CM品質US-SNR異常(%s,%s)" % (so, node)
+        try:
+            if node_arr['A-'+node]=='Y' and node_arr['B-'+node]=='N':
+                msg = "NODE所屬CM品質已低於異常標準,但未達結案標準"
+                OEMS_unity(so, node, reason, msg, 'N')
+                SQL = "update node_info set alert='U',ceasetime=sysdate where companyno='%s' and node='%s'" % (so, node);
+                print SQL
+                oracon_upd.execone(SQL)
+                oracon_upd.commit()
+            elif (node_arr['A-'+node]=='Y' or node_arr['A-'+node]=='U') and node_arr['B-'+node]=='C':
+                msg = "NODE所屬CM品質已符合標準,已達結案標準"
+                OEMS_unity(so, node, reason, msg, 'C')
+                SQL = "update node_info set alert='N',ceasetime=sysdate where companyno='%s' and node='%s'" % (so, node);
+                print SQL
+                oracon_upd.execone(SQL)
+                oracon_upd.commit()
+        except:
+            pass
+        sys.stdout.flush()
+
+if oracon_upd.db:
+    oracon_upd.se_close()
+
+sys.exit(0)

@@ -1,0 +1,314 @@
+<?php
+  /*
+    請使用UTF-8 without BOM編碼
+    0 未收
+    1 正常
+    2 停機
+    3 已拆
+    4 註銷
+    5 促銷中
+    6 裝機中
+    7 待拆中
+    8 欠費中
+    9 移機中
+    A 已關機
+    B 待關機
+
+    1 裝機
+    5 維修
+    6 移機
+    9 立即開通
+    C 換機
+    N 更換產品
+    => QOS
+
+    3 拆機
+    4 停機
+    A 欠費關機
+    A 關機
+    D 欠費關機
+    D 關機
+    => ALOCK
+  */
+  include_once('common.inc.php');
+
+  $now = date("Y-m-d H:i:s");
+  echo "START: $now\n";
+
+  $tday = date("Ymd");
+  $yday = date("Y-m-d",strtotime('-1 day'));
+  //$yday = '2013-03-04';
+
+  $soisc = array();
+
+  $ora = GetDBH('CNIS');
+  $osth = oci_parse($ora, "select companyno,shortname,isc from so where isc is not null order by mso,companyno");
+  oci_execute($osth);
+  while ($orow = oci_fetch_assoc($osth)) {
+    $orow = strfilter($orow);
+
+    $table = '';
+    if ($orow['ISC'] == 'allot')
+      $table = 'custdata_allot';
+    else if ($orow['ISC'] == 'procera')
+      $table = 'custdata_procera';
+
+    $soisc[$orow['COMPANYNO']] = $table;
+
+    //break;
+  }
+  oci_close($ora);
+
+  while (list($k, $v) = each($soisc)) {
+    $so    = $k;
+    $table = $v;
+
+    if (empty($so) || empty($table)) {
+      echo "Error: $so or $table is empty\n";
+      continue;
+    }
+
+    echo "$so $table\n";
+
+    if (in_array($so, array('101','103','104','300','701'))) {
+      $dbh = GetDBH('TFMCossMS','return');
+    }
+    else if (in_array($so, array('106'))) {
+      $dbh = GetDBH('CossMS_CG','return');
+    }
+    else {
+      $dbh = GetDBH('kbroCossMS','return');
+    }
+    if (stristr($dbh, 'error') || empty($dbh)) {
+      echo "$dbh\n";
+      continue;
+    }
+
+    $myd = GetDBH('ISC_M','','return');
+    if (stristr($myd, 'error') || empty($myd)) {
+      echo "$myd\n";
+      continue;
+    }
+
+    $ora = GetDBH('CNIS','COSS');
+    if (stristr($ora, 'error') || empty($ora)) {
+      echo "$ora\n";
+      continue;
+    }
+
+    //
+    $custall = $cust1 = $cust2 = array();
+    $custa = $custb = $cust_heavy = $v2_heavy1 = $v2_heavy2 = array();
+
+    $sql = "select companyno,subsid,workkind,substring(workkind,1,1) workkind2 from ms0303 with (nolock)
+             where companyno='$so' and actiontime >= '$yday 00:00:00' and msaction = '2'
+             order by actiontime asc";
+    echo $sql . "\n";
+    $sth = mssql_query($sql, $dbh);
+    while ($row = mssql_fetch_assoc($sth)) {
+      $row = strfilter($row);
+
+      if ($row['workkind2'] == '3' || $row['workkind2'] == '4' || $row['workkind2'] == 'A' || $row['workkind2'] == 'D') // 停拆 = ALOCK
+        $custall[$row['subsid']] = $row['workkind'] . '(ALOCK)';
+      else
+        $custall[$row['subsid']] = $row['workkind'];
+    }
+
+    $sql = "select companyno,subsid,custstatus,substring(custstatus,1,1) custstatus2,billitem from ms0200 with (nolock)
+            where companyno='$so' and substring(servicename,1,1) = '2' and
+            substring(custstatus,1,1) in ('0','1','2','6','7','8','9','A','B') and singlesn is not null and singlesn <> ''
+            and (createtime >= '$yday 00:00:00' or updatetime >= '$yday 00:00:00' or tiestart >= '$yday 00:00:00' or instdate >= '$yday 00:00:00' or
+            stopdate >= '$yday 00:00:00' or recoverdate >= '$yday 00:00:00' or movedate >= '$yday 00:00:00' or
+            haltdate >= '$yday 00:00:00' or discntdate >= '$yday 00:00:00' or connectdate >= '$yday 00:00:00')";
+    echo $sql . "\n";
+    $sth = mssql_query($sql, $dbh);
+    while ($row = mssql_fetch_assoc($sth)) {
+      $row = strfilter($row);
+
+      if ($row['custstatus2'] == '2' || $row['custstatus2'] == 'A') // 停關 = ALOCK
+        $custall[$row['subsid']] .= (!empty($custall[$row['subsid']]) ? ',' : '') . $row['custstatus'] . '(ALOCK)';
+      else
+        $custall[$row['subsid']] .= (!empty($custall[$row['subsid']]) ? ',' : '') . $row['custstatus'];
+    }
+
+    while (list($k, $v) = each($custall)) {
+      if (stristr($v,'ALOCK'))
+        $cust2[$k] = $v;
+      else
+        $cust1[$k] = $v;
+    }
+
+    // LOCK
+    $sql = "lock table $table write";
+    echo "$sql\n";
+    mysql_query($sql, $myd);
+
+    $custa = array_keys($cust1);
+    $custb = array_keys($cust2);
+
+    //
+    echo '頻寬異動數: ' . count($custa) . "\n";
+    print_r($custa);
+    while (count($custa) > 0) {
+      $a1 = $a2 = array();
+      $a1 = array_slice($custa, 0, 200); // 前200筆
+      $a2 = array_splice($custa, 200); // 其餘的筆數
+      $custa = $a2;
+
+      if (count($a1) > 0) {
+        $aa = "'" . implode("','", $a1) . "'";
+        //echo "$aa\n";
+
+        $stho = oci_parse($ora, "select companyno,subsid,case when heavy='Y' then 'Y' else 'N' end heavy from ext_ms0200 where companyno='$so' and subsid in ($aa)");
+        oci_execute($stho);
+        while ($rowo = oci_fetch_assoc($stho)) {
+          $rowo = strfilter($rowo);
+          $cust_heavy[$rowo['SUBSID']] = $rowo['HEAVY'];
+        }
+
+        $sql = "select
+                b.companyno,b.subsid,b.servicename,b.custstatus,b.singlesn,b.packagename,b.billitem,z.actdate,z.oldpackage,z.oldcharge,z.newpackage,z.newcharge
+                from ms0102 a with (nolock)
+                inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A','B') and substring(b.servicename,1,1) = '2' and b.singlesn is not null and b.singlesn <> ''
+                left join (
+                  select x.companyno,x.subsid,x.msflag,convert(varchar(8),x.startdate,112) startdate,case when x.actdate is not null and x.actdate <> '' then convert(varchar(8),x.actdate,112) else convert(varchar(8),x.startdate,112) end actdate,x.oldpackage,x.oldcharge,x.newpackage,x.newcharge
+                  from ms0216 x with (nolock)
+                  inner join (
+                    select m.companyno,m.subsid,max(m.recvno) recvno from ms0216 m with (nolock)
+                    inner join ms0200 n with (nolock) on n.companyno=m.companyno and n.subsid=m.subsid and substring(n.custstatus,1,1) in ('0','1','2','6','7','8','9','A','B') and substring(n.servicename,1,1) = '2' and n.singlesn is not null and n.singlesn <> ''
+                    where m.companyno='$so' and m.subsid in ($aa) group by m.companyno,m.subsid
+                  ) y on y.companyno=x.companyno and y.subsid=x.subsid and y.recvno=x.recvno
+                  where x.companyno='$so' and x.subsid in ($aa) and x.msflag in ('1 正常','3 原價升級')
+                ) z on z.companyno=b.companyno and z.subsid=b.subsid
+                where a.companyno='$so' and a.addrno='0' and b.subsid in ($aa)";
+        echo "\n" . $sql . "\n";
+        $sth = mssql_query($sql, $dbh);
+        while ($row = mssql_fetch_assoc($sth)) {
+          $row = strfilter($row);
+
+          $companyno = $row['companyno'];
+          $subsid = $row['subsid'];
+          $servicename = $row['servicename'];
+          $custstatus = $row['custstatus'];
+          $singlesn = $row['singlesn'];
+          $packagename = $row['packagename'];
+          $billitem = $row['billitem'];
+          $actdate = $row['actdate'];
+          $oldpackage = $row['oldpackage'];
+          $oldcharge = $row['oldcharge'];
+          $newpackage = $row['newpackage'];
+          $newcharge = $row['newcharge'];
+          $hv = 'N';
+          if ($cust_heavy[$subsid] == 'Y') $hv = 'Y';
+
+          echo $companyno . ' ' . $subsid . ' ' . $custstatus . ' ' . $singlesn . ' ' . $packagename . ' ' . $billitem . ' ' . $hv . "\n";
+
+          if (!empty($packagename) && !empty($billitem) && !empty($oldpackage) && !empty($oldcharge) && !empty($newpackage) && !empty($newcharge)) {
+            if ($packagename == $oldpackage && $billitem == $oldcharge) { // 促案變更未過帳(現行方案=舊方案,現行收費=舊收費)
+              if ($tday >= $actdate) { // 已生效
+                echo 'new: ' . $oldpackage . ' ' . $oldcharge . ' <' . $actdate . '> ' . $newpackage . ' ' . $newcharge . "\n";
+                $packagename = $newpackage;
+                $billitem    = $newcharge;
+              }
+            }
+            else if ($packagename == $newpackage && $billitem == $newcharge) { // 促案變更已過帳(現行方案=新方案,現行收費=新收費)
+              if ($actdate > $tday) { // 未生效
+                echo 'old: ' . $oldpackage . ' ' . $oldcharge . ' <' . $actdate . '> ' . $newpackage . ' ' . $newcharge . "\n";
+                $packagename = $oldpackage;
+                $billitem    = $oldcharge;
+              }
+            }
+          }
+
+          //$sql2 = "replace into $table (companyno,subsid,servicename,custstatus,singlesn,billitem,hv,updatetime,wait4sync) values ('$companyno','$subsid','$servicename','$custstatus','$singlesn','$billitem','$hv',now(),'Y')";
+          $sql2 = "insert into $table (companyno,subsid,servicename,custstatus,singlesn,billitem,hv,updatetime,wait4sync) values ('$companyno','$subsid','$servicename','$custstatus','$singlesn','$billitem','$hv',now(),'Y') on duplicate key update servicename=values(servicename),custstatus=values(custstatus),singlesn=values(singlesn),billitem=values(billitem),hv=values(hv),updatetime=values(updatetime),wait4sync=values(wait4sync)";
+          echo "$sql2\n";
+          mysql_query($sql2, $myd);
+        }
+      }
+    }
+
+    echo "\n";
+    echo '停拆機數: ' . count($custb) . "\n";
+    print_r($custb);
+    while (count($custb) > 0) {
+      $b1 = $b2 = array();
+      $b1 = array_slice($custb, 0, 200);
+      $b2 = array_splice($custb, 200);
+      $custb = $b2;
+
+      if (count($b1) > 0) {
+        $bb = "'" . implode("','", $b1) . "'";
+        //echo "$bb\n";
+
+        $sql2 = "update $table set qos='ALOCK',updatetime=now(),wait4sync='Y' where companyno='$so' and subsid in ($bb)";
+        echo "$sql2\n";
+        mysql_query($sql2, $myd);
+      }
+    }
+
+    echo "\n";
+    echo "COSS PU\n";
+    print_r($cust_heavy);
+
+    // V2的PU名單
+    $stho = oci_parse($ora, "select companyno,subsid,case when heavy='Y' then 'Y' else 'N' end heavy from ext_ms0200 where companyno='$so' and updatetime >= to_date('$yday','YYYY-MM-DD')");
+    oci_execute($stho);
+    while ($rowo = oci_fetch_assoc($stho)) {
+      $rowo = strfilter($rowo);
+
+      if ($rowo['HEAVY'] == 'Y')
+        array_push($v2_heavy1, $rowo['SUBSID']);
+      else
+        array_push($v2_heavy2, $rowo['SUBSID']);
+    }
+
+    echo "\n";
+    echo 'V2 PU=Y: ' . count($v2_heavy1) . "\n";
+    print_r($v2_heavy1);
+    while (count($v2_heavy1) > 0) {
+      $c1 = $c2 = array();
+      $c1 = array_slice($v2_heavy1, 0, 200);
+      $c2 = array_splice($v2_heavy1, 200);
+      $v2_heavy1 = $c2;
+
+      if (count($c1) > 0) {
+        $cc = "'" . implode("','", $c1) . "'";
+
+        $sql2 = "update $table set hv='Y',updatetime=now(),wait4sync='Y' where companyno='$so' and subsid in ($cc)";
+        echo "$sql2\n";
+        mysql_query($sql2, $myd);
+      }
+    }
+
+    echo "\n";
+    echo 'V2 PU=N: ' . count($v2_heavy2) . "\n";
+    print_r($v2_heavy2);
+    while (count($v2_heavy2) > 0) {
+      $d1 = $d2 = array();
+      $d1 = array_slice($v2_heavy2, 0, 200);
+      $d2 = array_splice($v2_heavy2, 200);
+      $v2_heavy2 = $d2;
+
+      if (count($d1) > 0) {
+        $dd = "'" . implode("','", $d1) . "'";
+
+        $sql2 = "update $table set hv='N',updatetime=now(),wait4sync='Y' where companyno='$so' and subsid in ($dd)";
+        echo "$sql2\n";
+        mysql_query($sql2, $myd);
+      }
+    }
+
+    // UNLOCK
+    $sql = "unlock tables";
+    echo "$sql\n";
+    mysql_query($sql, $myd);
+
+    mssql_close($dbh);
+    mysql_close($myd);
+    oci_close($ora);
+  }
+
+  $now = date("Y-m-d H:i:s");
+  echo "END: $now\n";
+?>

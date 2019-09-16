@@ -1,0 +1,926 @@
+﻿#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+import os,sys,time,string,binascii,re
+from pystack import Stack
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+class CA_FUNC:
+    def __init__(self, srcid, type, pseq):
+        try:
+            self.xca_mailid = int(time.time() % 1023)
+            #self.xca_mailid = 0
+            self.sourceid = srcid
+            self.qlen = 5000
+            self.stk = Stack()
+            self.idx = -1
+            self.curr_idx = 0
+            self.operation_idx = 1
+            self.seqid = pseq
+            self.nid = {}
+            self.nid['101'] = 1
+            self.nid['103'] = 3
+            self.nid['104'] = 2
+            self.nid['300'] = 4
+            self.nid['701'] = 5
+            self.nid['106'] = 6
+            self.nid['210'] = 23
+            self.nid['220'] = 21
+            self.nid['230'] = 20
+            self.nid['240'] = 22
+            self.nid['250'] = 24
+            self.nid['260'] = 25
+            self.nid['310'] = 27
+            self.nid['330'] = 26
+            self.nid['410'] = 28
+            self.nid['420'] = 29
+            self.nid['610'] = 30
+            self.nid['810'] = 31
+            self.nid['820'] = 32
+            self.nid['999'] = 101
+            if type=='feedback':
+                self.destid = '0002'
+            else:
+                self.destid = '0257'
+            self.q = {}
+            i = 0
+            while i<self.qlen:
+                self.q['CMD-%d'%(i)] = ''
+                self.q['SID-%d'%(i)] = ''
+                self.q['KEY-%d'%(i)] = ''
+                self.q['RSP-%d'%(i)] = ''
+                self.q['STATUS-%d'%(i)] = 0
+                i = i+1
+        except Exception, errmsg:
+            print "Error init(): ",errmsg
+
+    def print_q(self):
+        try:
+            i = 0
+            while i<self.qlen:
+                if self.q['STATUS-%d'%(i)]>0:
+                    print i, self.q['SID-%d'%(i)], self.q['STATUS-%d'%(i)], self.q['KEY-%d'%(i)]
+                i = i+1
+        except Exception, errmsg:
+            print "Error find_q(): ", errmsg
+
+    def find_q(self, status):
+        try:
+            i = 0
+            while i<self.qlen:
+                if self.q['STATUS-%d'%(i)]==status:
+                    return i
+                i = i+1
+            return -1
+        except Exception, errmsg:
+            print "Error find_q(): ", errmsg
+            return -1
+
+    def seek_q(self, status):
+        try:
+            if status<0:
+                self.curr_idx = 0
+                return None,None,None,-1,-1
+            i = self.curr_idx
+            while i<self.qlen:
+                if self.q['STATUS-%d'%(i)]==status:
+                    #print self.q['SID-%d'%(i)], self.q['CMD-%d'%(i)], self.q['RSP-%d'%(i)], i, self.q['KEY-%d'%(i)]
+                    return self.q['SID-%d'%(i)], self.q['CMD-%d'%(i)], self.q['RSP-%d'%(i)], i, self.q['KEY-%d'%(i)]
+                i = i+1
+                self.curr_idx = i
+            return None,None,None,-1,-1
+        except Exception, errmsg:
+            print "Error find_q(): ", errmsg
+            return None,None,None,-1,-1
+
+    def upd_q(self, idx, status):
+        try:
+            self.q['STATUS-%d'%(idx)] = status
+            return 1
+        except Exception, errmsg:
+            print "Error upd_q(): ", errmsg
+            return -1
+
+    def mapping_idx(self, sid):
+        try:
+            idx = self.q['IDX-%s'%(sid)]
+            return idx
+        except Exception, errmsg:
+            print "Error mapping_idx(): ", errmsg
+            return -1
+
+    def rcv_q(self, idx, rsp):
+        try:
+            self.q['RSP-%d'%(idx)] = rsp
+            return 1
+        except Exception, errmsg:
+            print "Error rcv_q(): ", errmsg
+            return -1
+
+    def put_q(self, sid, cmd, key):
+        try:
+            idx = self.find_q(0)
+            print 'put:',idx
+            if idx>=0:
+                self.q['CMD-%d'%(idx)] = cmd
+                self.q['SID-%d'%(idx)] = sid
+                self.q['KEY-%d'%(idx)] = key
+                self.q['RSP-%d'%(idx)] = ''
+                self.q['STATUS-%d'%(idx)] = 1
+                self.q['IDX-%s'%(sid)] = idx
+                self.idx = idx
+                self.stk.push(idx)
+                self.curr_idx = 0
+                return idx
+            return -1
+        except Exception, errmsg:
+            print "Error put_q(): ",errmsg
+            return -1
+
+    def rollback_q(self, lp):
+        try:
+            i = 0
+            while i<lp:
+                i = i+1
+                idx = self.stk.pop()
+                if idx>=0:
+                    self.q['STATUS-%d'%(idx)] = 0
+                    sid = self.q['SID-%d'%(idx)]
+                    del self.q['IDX-%s'%(sid)]
+        except Exception, errmsg:
+            print "Error rollback_q(): ",errmsg
+            return -1
+
+    def prn_data(self, d):
+        if len(d)==0:
+            return None
+        k = 0
+        print d[2:]
+        while k<len(d):
+            pp = ""
+            i = 0
+            while i<16:
+                if k+i>=len(d):
+                    j = k+i
+                    while j<k+16:
+                        print "  ",
+                        j = j+1
+                    break
+                pp = d[k+i]
+                vs = binascii.hexlify(pp)
+                print vs,
+                i = i+1
+            print " - ",
+            pp = ""
+            i = 0
+            while i<16:
+                if k+i>=len(d): break
+                pp = d[k+i]
+                if pp in (string.digits+string.letters+string.punctuation):
+                    print pp,
+                else:
+                    print "?",
+                i = i+1
+            print ""
+            k = k+16
+        print ""
+
+    def ird_cmd(self, cmd):
+        s = "0069%s" % (cmd)
+        i = len(s)
+        while i<108:
+            s = s+'0'
+            i = i+1
+        return s
+
+    def ird_cmd_20(self, cmd):
+        s = "0069%s" % (cmd)
+        i = len(s)
+        while i<108:
+            s = s+'20'
+            i = i+2
+        return s
+
+    def utf8(self, s):
+        try:
+            t = s.decode('big5')
+            t1 = t.encode('utf-8')
+        except Exception, msg:
+            t = "轉碼失敗".decode('big5')
+            t1 = t.encode('utf-8')
+            print msg
+            sys.stdout.flush()
+        return t1
+    
+    def gw_combo(self, seq, sid, icc, cmd, broadcast='U'):
+        sidstr = "%.4d" % (self.sourceid)
+        print sidstr
+        today = time.strftime("%Y%m%d", time.gmtime())
+        self.seqid = self.seqid+1
+        xseq = "%.9d" % (self.seqid)
+        if broadcast=='G':
+            str = xseq+'01'+sidstr+self.destid+'44289'+today+'N'+today+today+broadcast+cmd
+        else:
+            str = xseq+'01'+sidstr+self.destid+'44289'+today+'N'+today+today+broadcast+icc+cmd
+        print 'combo:',str
+        return self.put_q(xseq, str, sid)
+        
+
+    def gw_combo_profile(self, seq, sid, bgd, endd, icc, cmd, broadcast='U', profile='N'):
+        sidstr = "%.4d" % (self.sourceid)
+        today = time.strftime("%Y%m%d", time.gmtime())
+        self.seqid = self.seqid+1
+        xseq = "%.9d" % (self.seqid)
+        if broadcast=='G':
+            str = xseq+'01'+sidstr+self.destid+'44289'+today+profile+today+endd+broadcast+cmd
+        else:
+            str = xseq+'01'+sidstr+self.destid+'44289'+today+profile+today+endd+broadcast+icc+cmd
+        print str
+        return self.put_q(xseq, str, sid)
+
+    def gw_ack(self, xsid):
+        sidstr = "%.4d" % (self.sourceid)
+        today = time.strftime("%Y%m%d", time.gmtime())
+        self.seqid = self.seqid+1
+        xseq = "%.9d" % (self.seqid)
+        str = xseq+'05'+self.destid+sidstr+'44289'+today+'1000'+xsid+'000000000000000000000000'
+        return str
+
+    def gw_keepalive(self, bgd):
+        sidstr = "%.4d" % (self.sourceid)
+        seq = "%.9d" % (self.operation_idx)
+        str = seq+'05'+sidstr+self.destid+'44289'+bgd+'1002'
+        self.operation_idx = self.operation_idx+1
+        return str
+
+    def gw_msg(self, s):
+        xid = s[0:9]
+        type = s[9:11]
+        src_id = s[11:15]
+        dst_id = s[15:19]
+        ppid = s[19:24]
+        sdate = s[24:32]
+        cmd = s[32:36]
+        if cmd=='1000':
+            sid = s[36:45]
+            ims_pid = s[45:57]
+            sms_pid = s[57:69]
+            return 'OK: '+sid
+        elif cmd=='1001':
+            sid = s[36:45]
+            nack = s[45:46]
+            error = s[46:50]
+            error_ext = s[50:54]
+            cmd_len = s[54:57]
+            cmd_sec = s[57:]
+            if error!='0000':
+                return 'ERROR: '+error
+            else:
+                return 'ERROR_EXT: '+error_ext
+        elif cmd=='1002':
+            return 'ERROR: 1002 No command'
+        else:
+            return 'ERROR: Unknown'
+        return 'ERROR: SYSTEM ERROR'
+
+    def gw_cancel_icc(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        if self.gw_combo('00',sid, bgd, endd, iccs, '0007')<0:
+            return -1
+        if self.gw_combo('01',sid, bgd, endd, iccs, '0051')<0:
+            self.rollback_q(1)
+            return -1
+        if self.gw_combo('02',sid, bgd, endd, iccs, '0023')<0:
+            self.rollback_q(2)
+            return -1
+        return 1
+
+    def gw_cancel_icc_no_cancel(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        if self.gw_combo('00',sid, bgd, endd, iccs, '0051')<0:
+            return -1
+        if self.gw_combo('01',sid, bgd, endd, iccs, '0023')<0:
+            self.rollback_q(1)
+            return -1
+        return 1
+
+    def gw_repack_icc(self, sid, bgd, endd, icc, stb):
+        iccs = icc[:10]
+        stbs = stb[:10]
+        if self.gw_combo('00',sid, bgd, endd, iccs, '00520000'+stbs)<0:
+            return -1
+        if self.gw_combo('01',sid, bgd, endd, iccs, '0007')<0:
+            self.rollback_q(1)
+            return -1
+        if self.gw_combo('02',sid, bgd, endd, iccs, '0023')<0:
+            self.rollback_q(2)
+            return -1
+        return 1
+
+    def gw_add_icc(self, sid, bgd, endd, icc, stb, profile='N'):
+        iccs = icc[:10]
+        stbs = stb[:10]
+        if self.gw_combo_profile('00',sid, bgd, endd, iccs, '0051', 'U', profile)<0:
+            return -1
+        if self.gw_combo_profile('01',sid, bgd, endd, iccs, '00520000'+stbs, 'U', profile)<0:
+            self.rollback_q(1)
+            return -1
+        if self.gw_combo_profile('02',sid, bgd, endd, iccs, '0024', 'U', profile)<0:
+            self.rollback_q(2)
+            return -1
+        return 1
+
+    def gw_add_prod(self, sid, bgd, endd, icc, channel, profile='N'):
+        iccs = icc[:10]
+        if self.gw_combo_profile('00',sid, bgd, endd, iccs, '0002'+channel+bgd+endd, 'U', profile)<0:
+            return -1
+        return 1
+
+    def gw_add_prod_7days(self, sid, bgd, endd, icc, channel, profile='N'):
+        iccs = icc[:10]
+        today = time.strftime("%Y%m%d", time.gmtime())
+        s_year = int(today[:4])
+        s_month = int(today[4:6])
+        s_day = int(today[6:8])
+        tmpdate = time.gmtime(time.mktime((s_year,s_month,s_day,0,0,0,-1,-1,-1))+86400*7)
+        sevendays = time.strftime("%Y%m%d", tmpdate)
+        if self.gw_combo_profile('00',sid, bgd, sevendays, iccs, '0002'+channel+bgd+sevendays, 'U', profile)<0:
+            return -1
+        return 1
+
+    def gw_add_prod_62days(self, sid, bgd, endd, icc, channel, profile='N'):
+        iccs = icc[:10]
+        today = time.strftime("%Y%m%d", time.gmtime())
+        s_year = int(today[:4])
+        s_month = int(today[4:6])
+        s_day = int(today[6:8])
+        tmpdate = time.gmtime(time.mktime((s_year,s_month,s_day,0,0,0,-1,-1,-1))+86400*62)
+        sevendays = time.strftime("%Y%m%d", tmpdate)
+        if self.gw_combo_profile('00',sid, bgd, sevendays, iccs, '0002'+channel+bgd+sevendays, 'U', profile)<0:
+            return -1
+        return 1
+
+    def gw_add_prod_ndays(self, sid, bgd, endd, icc, channel, nday, profile='N'):
+        iccs = icc[:10]
+        today = time.strftime("%Y%m%d", time.gmtime())
+        s_year = int(today[:4])
+        s_month = int(today[4:6])
+        s_day = int(today[6:8])
+        tmpdate = time.gmtime(time.mktime((s_year,s_month,s_day,0,0,0,-1,-1,-1))+86400*nday)
+        sevendays = time.strftime("%Y%m%d", tmpdate)
+        if self.gw_combo_profile('00',sid, bgd, sevendays, iccs, '0002'+channel+bgd+sevendays, 'U', profile)<0:
+            return -1
+        return 1
+
+    def gw_cancel_prod(self, sid, bgd, endd, icc, channel):
+        iccs = icc[:10]
+        if self.gw_combo('00',sid, bgd, endd, iccs, '0006'+channel)<0:
+            return -1
+        return 1
+
+    def gw_chgpwd(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('200001050430303030');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        cmd = self.ird_cmd('200002050430303030');
+        if self.gw_combo('01',sid, bgd, endd, iccs, cmd)<0:
+            self.rollback_q(1)
+            return -1
+        return 1
+
+    def gw_resetpincode(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('200002050430303030');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_resetpwd(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('01800100');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_cmd_pincode(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmdstr = "0056010000"
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        return 1
+
+    def gw_mail(self, sid, bgd, endd, icc, mmsg, flag=0, priority=0):
+        if mmsg is None or mmsg=='':
+            return -1
+        iccs = icc[:10]
+        if self.xca_mailid<1023:
+            self.xca_mailid = self.xca_mailid+1
+        else:
+            self.xca_mailid = 1
+        #mmsgs = self.utf8(mmsg)
+        mmsgs = mmsg
+        msg = ""
+        for c in mmsgs:
+            msg = msg+"%.2X" % (ord(c))
+        space_flag = 1
+        if mmsgs[len(mmsgs)-2:len(mmsgs)]!='  ':
+            space_flag = 0
+        #print msg
+        seg = ((len(msg)/2-1)/45)+1
+        curr_seg = 0
+        curr_idx = 0
+        while curr_seg<seg:
+            if curr_seg<=seg-2:
+                sndmsg = msg[curr_idx:(90+curr_idx)]
+                curr_idx = curr_idx+90
+                xlen = 48
+            else:
+                sndmsg = msg[curr_idx:len(msg)+1]
+                curr_idx = curr_idx+len(sndmsg)
+                xlen = len(sndmsg)/2+3
+                xlen = 48
+            cmdstr = "192001%.2d%.4X%.2X%s" % (xlen, (self.xca_mailid<<6)+seg, (priority<<6)+curr_seg, sndmsg)
+            cmd = self.ird_cmd(cmdstr)
+            cmd20 = self.ird_cmd_20(cmdstr)
+            hdseq = "%.2d" % (curr_seg)
+            #print "%s,%d : %s" % (hdseq,self.xca_mailid,cmd)
+            if flag==0:
+                if space_flag:
+                    combo_flag = self.gw_combo(hdseq, sid, bgd, endd, iccs, cmd20, 'U')
+                else:
+                    combo_flag = self.gw_combo(hdseq, sid, bgd, endd, iccs, cmd, 'U')
+            else:
+                if space_flag:
+                    combo_flag = self.gw_combo(hdseq, sid, bgd, endd, iccs, cmd20, 'G')
+                else:
+                    combo_flag = self.gw_combo(hdseq, sid, bgd, endd, iccs, cmd, 'G')
+            if combo_flag < 0:
+                self.rollback_q(curr_seg)
+                print 'Mail error'
+                return -1
+            curr_seg = curr_seg+1
+        return 1
+
+    def gw_mail_by_profile(self, sid, bgd, endd, icc, mmsg, flag=0, profile='N'):
+        if mmsg is None or mmsg=='':
+            return -1
+        iccs = icc[:10]
+        if self.xca_mailid<1023:
+            self.xca_mailid = self.xca_mailid+1
+        else:
+            self.xca_mailid = 1
+        #mmsgs = self.utf8(mmsg)
+        mmsgs = mmsg
+        msg = ""
+        for c in mmsgs:
+            msg = msg+"%.2X" % (ord(c))
+        space_flag = 1
+        if mmsgs[len(mmsgs)-2:len(mmsgs)]!='  ':
+            space_flag = 0
+        #print msg
+        seg = ((len(msg)/2-1)/45)+1
+        curr_seg = 0
+        curr_idx = 0
+        priority = 0
+        while curr_seg<seg:
+            if curr_seg<=seg-2:
+                sndmsg = msg[curr_idx:(90+curr_idx)]
+                curr_idx = curr_idx+90
+                xlen = 48
+            else:
+                sndmsg = msg[curr_idx:len(msg)+1]
+                curr_idx = curr_idx+len(sndmsg)
+                xlen = len(sndmsg)/2+3
+                xlen = 48
+            cmdstr = "192001%.2d%.4X%.2X%s" % (xlen, (self.xca_mailid<<6)+seg, (priority<<6)+curr_seg, sndmsg)
+            cmd = self.ird_cmd(cmdstr)
+            cmd20 = self.ird_cmd_20(cmdstr)
+            hdseq = "%.2d" % (curr_seg)
+            #print "%s,%d : %s" % (hdseq,self.xca_mailid,cmd)
+            if flag==0:
+                if space_flag:
+                    combo_flag = self.gw_combo_profile(hdseq, sid, bgd, endd, iccs, cmd20, 'U', profile)
+                else:
+                    combo_flag = self.gw_combo_profile(hdseq, sid, bgd, endd, iccs, cmd, 'U', profile)
+            else:
+                if space_flag:
+                    combo_flag = self.gw_combo_profile(hdseq, sid, bgd, endd, iccs, cmd20, 'G', profile)
+                else:
+                    combo_flag = self.gw_combo_profile(hdseq, sid, bgd, endd, iccs, cmd, 'G', profile)
+            if combo_flag < 0:
+                self.rollback_q(curr_seg)
+                print 'Mail error'
+                return -1
+            curr_seg = curr_seg+1
+        return 1
+
+    def gw_mail_by_nid(self, sid, bgd, endd, so, mmsg):
+        if mmsg is None or mmsg=='':
+            return -1
+        if self.xca_mailid<1023:
+            self.xca_mailid = self.xca_mailid+1
+        else:
+            self.xca_mailid = 1
+        try:
+            mmsg = "[[[%d]]]%s" % (self.nid[so], mmsg)
+        except:
+            return -1
+        #mmsgs = self.utf8(mmsg)
+        mmsgs = mmsg
+        msg = ""
+        for c in mmsgs:
+            msg = msg+"%.2X" % (ord(c))
+        space_flag = 1
+        if mmsgs[len(mmsgs)-2:len(mmsgs)]!='  ':
+            space_flag = 0
+        #print msg
+        seg = ((len(msg)/2-1)/45)+1
+        curr_seg = 0
+        curr_idx = 0
+        priority = 0
+        while curr_seg<seg:
+            if curr_seg<=seg-2:
+                sndmsg = msg[curr_idx:(90+curr_idx)]
+                curr_idx = curr_idx+90
+                xlen = 48
+            else:
+                sndmsg = msg[curr_idx:len(msg)+1]
+                curr_idx = curr_idx+len(sndmsg)
+                xlen = len(sndmsg)/2+3
+                xlen = 48
+            cmdstr = "192002%.2d%.4X%.2X%s" % (xlen, (self.xca_mailid<<6)+seg, (priority<<6)+curr_seg, sndmsg)
+            cmd = self.ird_cmd(cmdstr)
+            cmd20 = self.ird_cmd_20(cmdstr)
+            hdseq = "%.2d" % (curr_seg)
+            if space_flag:
+                combo_flag = self.gw_combo(hdseq, sid, bgd, endd, '', cmd20, 'G')
+            else:
+                combo_flag = self.gw_combo(hdseq, sid, bgd, endd, '', cmd, 'G')
+            if combo_flag < 0:
+                self.rollback_q(curr_seg)
+                print 'Mail error'
+                return -1
+            curr_seg = curr_seg+1
+        return 1
+
+    def gw_mail_by_nid_by_profile(self, sid, bgd, endd, so, mmsg, profile='N'):
+        if mmsg is None or mmsg=='':
+            return -1
+        if self.xca_mailid<1023:
+            self.xca_mailid = self.xca_mailid+1
+        else:
+            self.xca_mailid = 1
+        try:
+            mmsg = "[[[%d]]]%s" % (self.nid[so], mmsg)
+        except:
+            return -1
+        #mmsgs = self.utf8(mmsg)
+        mmsgs = mmsg
+        msg = ""
+        for c in mmsgs:
+            msg = msg+"%.2X" % (ord(c))
+        space_flag = 1
+        if mmsgs[len(mmsgs)-2:len(mmsgs)]!='  ':
+            space_flag = 0
+        #print msg
+        seg = ((len(msg)/2-1)/45)+1
+        curr_seg = 0
+        curr_idx = 0
+        priority = 0
+        while curr_seg<seg:
+            if curr_seg<=seg-2:
+                sndmsg = msg[curr_idx:(90+curr_idx)]
+                curr_idx = curr_idx+90
+                xlen = 48
+            else:
+                sndmsg = msg[curr_idx:len(msg)+1]
+                curr_idx = curr_idx+len(sndmsg)
+                xlen = len(sndmsg)/2+3
+                xlen = 48
+            cmdstr = "192002%.2d%.4X%.2X%s" % (xlen, (self.xca_mailid<<6)+seg, (priority<<6)+curr_seg, sndmsg)
+            cmd = self.ird_cmd(cmdstr)
+            cmd20 = self.ird_cmd_20(cmdstr)
+            hdseq = "%.2d" % (curr_seg)
+            if space_flag:
+                combo_flag = self.gw_combo_profile(hdseq, sid, bgd, endd, '', cmd20, 'G', profile)
+            else:
+                combo_flag = self.gw_combo_profile(hdseq, sid, bgd, endd, '', cmd, 'G', profile)
+            if combo_flag < 0:
+                self.rollback_q(curr_seg)
+                print 'Mail error'
+                return -1
+            curr_seg = curr_seg+1
+        return 1
+
+    def gw_forcetune(self, sid, bgd, endd, icc, tune):
+        iccs = icc[:10]
+        if tune is None:
+            return -1
+        cmd = self.ird_cmd('19300106000100040017');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+    
+    def gw_forcetune_music(self, sid, bgd, endd, icc, tune):
+        iccs = icc[:10]
+        if tune is None:
+            return -1
+        cmd = self.ird_cmd('193001060001008201A6');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_networkid(self, sid, bgd, endd, icc, nwid):
+        iccs = icc[:10]
+        if nwid is None:
+            return -1
+        cmdstr = '19800104%.4X0001' % (int(nwid))
+        cmd = self.ird_cmd(cmdstr);
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_networkid_by_profile(self, sid, bgd, endd, icc, nwid, profile='N'):
+        iccs = icc[:10]
+        if nwid is None:
+            return -1
+        cmdstr = '19800104%.4X0001' % (int(nwid))
+        cmd = self.ird_cmd(cmdstr);
+        if self.gw_combo_profile('00', sid, bgd, endd, iccs, cmd, 'U', profile)<0:
+            return -1
+        return 1
+
+    def gw_setcredit(self, sid, bgd, endd, icc, pnt):
+        iccs = icc[:10]
+        cmdstr = "0013%.7d%.7d" % (int(pnt)*100, 160*100)
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        cmdstr = "0054123.193.111.16702002"
+        if self.gw_combo('01',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(1)
+            return -1
+        cmdstr = "006111%8s000000" % (bgd)
+        if self.gw_combo('02',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(2)
+            return -1
+        cmdstr = "0015"
+        if self.gw_combo('03',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(3)
+            return -1
+        return 1
+
+    def gw_resetcredit(self, sid, bgd, endd, icc, pnt):
+        iccs = icc[:10]
+        cmdstr = "0015"
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        cmdstr = "000803%.7d" % (int(pnt)*100)
+        if self.gw_combo('01',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(1)
+            return -1
+        cmdstr = "0009%.7d" % (160*100)
+        if self.gw_combo('02',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(2)
+            return -1
+        cmdstr = "0100%.7d" % (int(pnt)*100)
+        if self.gw_combo('03',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(3)
+            return -1
+        return 1
+
+    def gw_seteventprod(self, sid, bgd, endd, icc, prodid, prodname, price):
+        iccs = icc[:10]
+        #utf_prodname = self.utf8(prodname)
+        utf_prodname = prodname
+        prodlen = len(utf_prodname)
+        if prodid is not None:
+            xproductid = int(prodid)
+        else:
+            xproductid = 0
+        cmdstr = "0010%.12d%.2d%s" % (xproductid, prodlen, utf_prodname)
+        i = prodlen
+        while i<32:
+            cmdstr = cmdstr+chr(0)
+            i = i+1
+        pr = "%.5d" % int(price*100)
+        cmdstr = cmdstr+pr
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        return 1
+
+    def gw_immediate_callback(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmdstr = "0060%8s000000" % (bgd)
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        return 1
+
+    def gw_get_product(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmdstr = "0071"
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        return 1
+
+    def gw_suspend_ippv(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmdstr = "0014"
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        cmdstr = "0060%8s000000" % (bgd)
+        if self.gw_combo('01',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(1)
+            return -1
+        return 1
+
+    def gw_resume_ippv(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmdstr = "0015"
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        return 1
+
+    def gw_upd_ippvthreshold(self, sid, bgd, endd, icc, pnt):
+        iccs = icc[:10]
+        cmdstr = "0009%.7d" % (int(pnt)*100)
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        return 1
+
+    def gw_cmd_setcallback_date(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmdstr = "0054123.193.111.16702002"
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(1)
+            return -1
+        cmdstr = "006111%8s000000" % (bgd)
+        if self.gw_combo('01',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(2)
+            return -1
+        cmdstr = "0015"
+        if self.gw_combo('02',sid, bgd, endd, iccs, cmdstr)<0:
+            self.rollback_q(3)
+            return -1
+        return 1
+
+    def PVR_trans_hd(self, phd):
+        xlen = len(phd)
+        i = 0
+        vhd = "0000"
+        while i<xlen:
+            tmp = "%.2X" % (ord(phd[i]))
+            vhd = vhd + tmp
+            i = i+1
+        return vhd
+
+    def gw_PVR_pair_any(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('1970100000303030303030303030303030303030303030303030303030303030303030');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_PVR_pair_hd(self, sid, bgd, endd, icc, hd):
+        iccs = icc[:10]
+        hdkey = self.PVR_trans_hd(hd)
+        cmd = self.ird_cmd('19701017'+hdkey);
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_PVR_factory_reset(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('20400100');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_PVR_OTA_force(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('21000000');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_PVR_OTA_interactive(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('21000100');
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_PVR_hd_storage(self, sid, bgd, endd, icc, size):
+        iccs = icc[:10]
+        try:
+            xsize = int(size)
+        except:
+            return -1
+        if size<30000:
+            sz = "%.4X" % (size)
+            cmd = self.ird_cmd('19701102'+sz);
+            if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+                return -1
+            return 1
+        else:
+            return -1
+
+    def gw_BAT_set(self, sid, bgd, endd, icc, batid):
+        iccs = icc[:10]
+        bd = "%.4X" % (batid)
+        cmd = self.ird_cmd('19700102'+bd);
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_sync_icc(self, p_sid, bgd, endd, p_nuid):
+        x_nuid = p_nuid[:10]
+        if self.gw_combo('00',p_sid, bgd, endd, '', '0126'+p_nuid, 'G')<0:
+            return -1
+        return 1
+
+    def gw_boot_channel(self, sid, bgd, endd, icc, chn):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('19700301'+chn[:2]);
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmd)<0:
+            return -1
+        return 1
+
+    def gw_reboot_interactive(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('21900100');
+        if self.gw_combo_profile('00',sid, bgd, endd, iccs, cmd, 'U', '2')<0:
+            return -1
+        return 1
+
+    def gw_reboot_force(self, sid, bgd, endd, icc):
+        iccs = icc[:10]
+        cmd = self.ird_cmd('21900000');
+        if self.gw_combo_profile('00',sid, bgd, endd, iccs, cmd, 'U', '2')<0:
+            return -1
+        return 1
+
+    def gw_add_zipcode(self, sid, bgd, endd, icc, zipcode=0):
+        iccs = icc[:10]
+        try:
+            if re.match(r"^[1-9]\d{2}$", str(zipcode)):
+                zipcode = str(zipcode).ljust(5,'0')
+            elif re.match(r"^[1-9]\d{4}$", str(zipcode)):
+                pass
+            else:
+                zipcode = '00000'
+        except:
+            zipcode = '00000'
+        try:
+            cmdstr = '0048'+str(zipcode)
+        except:
+            cmdstr = '004800000'
+        if self.gw_combo('00',sid, bgd, endd, iccs, cmdstr)<0:
+            return -1
+        return 1
+
+
+    def prm_get_LCI(self,sid, nuid, old_nuid, stb_no, old_stb_no, model,old_model,create_date):
+        nuid = nuid[:10]
+        stbs = stb_no[:10]
+        old_nuids = old_nuid[:10]
+        old_stbs = old_stb_no[:10]
+        
+        sourceid = '0005'
+        cmdstr = sid + '08' + sourceid  + '000844033' + create_date + 'EUN' + nuid + 'C0881N' + old_nuids + 'C001S'+stbs+'S'+old_stbs+'22'+model+'22'+old_model
+        self.seqid = self.seqid+1
+        xseq = "%.9d" % (self.seqid)
+        return self.put_q(xseq, cmdstr, sid)
+        
+        
+    def prm_set_comm(self,sid,sno, stb_no, key, icc_no):
+      
+        strlen = '0'
+        stbs = hex(int(stb_no[:10])) #轉16進制
+        stbs = stbs[2:]
+        iccs = icc_no[:10]
+        #stbs = hex(2173908244)
+        if sno == 3:
+          strlen = '32'
+        else:
+          strlen = '48'
+        try:
+          cmdstr = '0069232000'+strlen+'00440'+str(sno)+stbs+key
+        except Exception, errmsg:
+            print "Error init(): ",errmsg
+            
+        self.seqid = self.seqid+1
+        xseq = "%.9d" % (self.seqid)
+        print stb_no,':',cmdstr,':',sid,':',iccs
+        if self.gw_combo('00',sid, iccs, cmdstr)<0:
+          print self.gw_combo('00',sid, iccs, cmdstr)
+          return -1
+        return 1
+      
+        
+    
+    
+      

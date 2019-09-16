@@ -1,0 +1,52 @@
+#!/usr/bin/bash
+. /ap/home/coss/.bash_profile
+
+if [ "$1" == "" ]; then
+        echo "Usage: $0   start | stop | restart"
+        exit
+fi
+
+cd /ap/home/coss/bin/dta
+progname="dta_pre_active.php"
+
+if [ "$1" == "stop" ] || [ "$1" == "restart" ]; then
+        rfg=`ps -ef | grep ${progname} | grep "/bin/php"`
+        if [ "$rfg" != "" ]; then
+                pids=`echo "${rfg}" | awk -F" " '{ print $2 }'`
+                if [ "${pids}" != "" ]; then
+                        echo "${pids}" | while read pid
+                        do
+                                echo "shutdown the process ${pid}"
+                                kill "${pid}"
+                        done
+                fi
+        fi
+fi
+
+if [ "$1" == "start" ] || [ "$1" == "restart" ]; then
+        rfg=`ps -ef | grep "${progname}" | grep "/bin/php"`
+        if [ "$rfg" != "" ]; then
+                echo "`date` INFO : ${progname} is already running ${rfg} "
+        else
+                /usr/local/bin/php ./${progname} 101  > /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 103  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 104  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 300  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 701  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 210  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 220  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 230  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 240  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 250  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 260  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 106  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 310  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 330  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 410  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 420  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 610  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 810  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                /usr/local/bin/php ./${progname} 820  >> /ap/home/coss/log/dta/dta_pre_act.log 2>&1
+                echo "`date` INFO :started DTA pre-activation..."
+        fi
+fi

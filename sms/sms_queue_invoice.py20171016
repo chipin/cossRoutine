@@ -1,0 +1,173 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+# 簡訊需為BIG5編碼
+import os,sys,time,re
+import urllib
+import httplib
+from oraclass import ORA
+
+reload(sys)
+sys.setdefaultencoding('ascii')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.ZHT16BIG5'
+
+querySQL = "select sid,target,msg,so from sms_invoice where status is null and sysdate >= booking_sendtime and rownum<=100 order by target,sid"
+updateSQL = "update sms_invoice set status=:1,status_date=sysdate,real_sendtime=sysdate,result=:2,msgid=:3,cnt=:4 where sid=:5"
+
+oracon = None
+while 1:
+    sent_flag = 0
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate
+    sys.stdout.flush()
+
+    hour = int(time.strftime("%H", time.localtime()))
+    if hour < 9 or hour >= 18:
+        print 'sleep 5 mins ...'
+        oracon = None
+        time.sleep(300)
+        continue
+
+    if oracon is None:
+        try:
+            oracon = ORA('coss@cnis')
+            if not oracon.db:
+                print 'Error: Unable to connect to server [CNIS]'
+                oracon = None
+                time.sleep(60)
+                continue
+        except:
+            print 'Error: Unable to connect to server [CNIS]'
+            oracon = None
+            time.sleep(60)
+            continue
+
+    try:
+        rst = oracon.execall(querySQL)
+    except:
+        print 'Error: Unable to execute SQL [CNIS]'
+        if oracon is not None:
+            oracon.se_close()
+            oracon = None
+        time.sleep(60)
+        continue
+
+    if rst is not None and len(rst) > 0:
+        sent_flag = 1
+        for aw in rst:
+            tme = time.strftime("%Y/%m/%d %H-%M-%S", time.localtime())
+            sid = int(aw[0])
+            target = aw[1]
+            msg = aw[2]
+            so = aw[3]
+
+            if so == '101':
+                auth_str = "username=VCSA003800&password=5835949594&rateplan=A&srcaddr=8707348"
+            elif so == '103':
+                auth_str = "username=VCSA003500&password=6644995242&rateplan=A&srcaddr=8707344"
+            elif so == '104':
+                auth_str = "username=VCSA003700&password=7253858468&rateplan=A&srcaddr=8707347"
+            elif so == '300':
+                auth_str = "username=VCSA003200&password=8254589484&rateplan=A&srcaddr=8707341"
+            elif so == '701':
+                auth_str = "username=VCSA003400&password=7779267475&rateplan=A&srcaddr=8707343"
+            elif so == '501': # 行銷
+                auth_str = "username=VCSA004500&password=8928758382&rateplan=A&srcaddr=8707355"
+            else: # 客服
+                auth_str = "username=VCSA003300&password=6864959499&rateplan=A&srcaddr=8707342"
+
+            sport = 18994
+            stype = 'BIG5'
+            status = 'ERROR'
+            result = 'Exception'
+            smbody = ''
+            smslen = smscnt = 0
+            twmid = twmcnt = 0
+            try:
+                msg = msg.replace('#','-')
+                msg = msg.replace('<','(')
+                msg = msg.replace('>',')')
+                smslen = len(msg.decode('big5'))
+
+                if smslen <= 0 or smslen > (67*5):
+                    status = 'ERROR'
+                    result = 'ERROR: msg length incorrect'
+                elif smslen > 70 and smslen <= (67*5): # 長簡訊
+                    smscnt = int(smslen/67)
+                    if smslen%67 > 0:
+                        smscnt = smscnt+1
+                    stype = 'LBIG5'
+                    sport = 18995
+
+                    for cnt in range(0, smscnt):
+                        submsg = msg.decode('big5')[cnt*67:(cnt+1)*67].encode('big5')
+                        header = "%%05%%00%%03%%C7%%%02d%%%02d" % (smscnt, cnt+1)
+                        smbody = "%s%s%s" % (smbody, header, urllib.quote(submsg))
+                        #print header,submsg,smbody
+                else: # 短簡訊
+                    smbody = urllib.quote(msg)
+            except Exception, detail:
+                status = 'ERROR'
+                result = "Exception: %s" % (detail)
+
+            if len(smbody) > 0 and smslen > 0:
+                try:
+                    rurl = 'http://v2.elinx.com.tw/GW/sms/sms_callback.php'
+                    rurl = urllib.quote(rurl)
+                    durl = "/send.cgi?%s&dstaddr=%s&encoding=%s&smbody=%s&response=%s" % (auth_str, target, stype, smbody, rurl)
+                    print durl
+
+                    twmdata = None
+                    server = "bizsms.taiwanmobile.com:%d" % (sport)
+                    twmconn = httplib.HTTPConnection(server)
+                    twmconn.connect()
+                    twmconn.request('GET', durl)
+                    twmresp = twmconn.getresponse()
+                    twmdata = twmresp.read()
+                    twmdata = twmdata.replace(chr(10),',')
+                    twmresp.close()
+                    twmconn.close()
+
+                    if twmdata is not None and len(twmdata) > 0:
+                        ma = re.search(r"msgid=(-?[0-9]+)", twmdata)
+                        if ma is not None:
+                            twmid = int(ma.group(1))
+                        ma2 = re.search(r"point=([0-9]+)", twmdata)
+                        if ma2 is not None:
+                            twmcnt = int(ma2.group(1))
+
+                        if twmid > 0:
+                            if twmcnt == 0:
+                                twmcnt = 1
+                            status = 'OK'
+                            result = twmdata
+                        else:
+                            status = 'ERROR'
+                            result = "ERROR: %s" % (twmdata)
+                except Exception, detail:
+                    status = 'ERROR'
+                    result = "Exception: %s" % (detail)
+
+            #update_param = ([status, result, twmid, twmcnt, sid],)
+            update_param = ([status, result, str(twmid), str(twmcnt), str(sid)],)
+            print update_param
+            try:
+                #status=:1 result=:2 msgid=:3 cnt=:4 sid=:5
+                oracon.updateone(updateSQL, update_param)
+                oracon.commit()
+            except Exception, detail:
+                print 'Exception: Unable to update OSS_SMS',detail
+                if oracon is not None:
+                    oracon.se_close()
+                    oracon = None
+                time.sleep(60)
+                continue
+
+            sys.stdout.flush()
+    if sent_flag==0:
+        if oracon is not None:
+            oracon.se_close()
+            oracon = None
+        time.sleep(10)
+    else:
+        time.sleep(1)
+    sys.stdout.flush()

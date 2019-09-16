@@ -1,0 +1,182 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+import sys
+import os
+import string
+import time
+from pysnmpclass import snmpclass
+from oraclass import ORA
+
+pre_exec_time = 0
+agent = snmpclass(version='v2c',ptimeout=1,pretries=3,debug=0)
+
+def query_status(ycmtsid, yip, ymodel, ycomm, yoid):
+    global cmts_oid, agent
+    print yoid
+    print ycmtsid, yip, ymodel, ycomm
+
+    yresult = {}
+
+    try:
+        for oname in yoid:
+            try:
+                tmp_mib = cmts_oid['%s-X' % (oname)]
+            except:
+                try:
+                    tmp_mib = cmts_oid['%s-%s' % (oname, ymodel)]
+                except:
+                    continue
+            rets = agent.snmpwalk([yip, '-c', ycomm, tmp_mib])
+            i = 0
+            lens = len(rets)
+            while i<lens:
+                zid = rets[i][0].replace(tmp_mib+'.','')
+                zvalue = rets[i][1]
+
+                if oname in ['ifIndex']:
+                    yresult['%s-%s-%d' % (ycmtsid, oname, i)] = zid
+                elif oname in ['CmPtr']:
+                    yresult['%s-%s-%d' % (ycmtsid, oname, i)] = zid
+                    yresult['%s-%s-%d' % (ycmtsid, 'CmPtrIdx', i)] = zvalue
+                else:
+                    yresult['%s-%s-%s' % (ycmtsid, oname, zid)] = zvalue
+
+                i = i+1
+                #print ycmtsid,oname,zid,zvalue
+            print "%s (%s %s) -> %d" % (ycmtsid, oname, tmp_mib, lens)
+
+            if oname in ['ifIndex','CmPtr']:
+                yresult['%s-%s-LEN' % (ycmtsid, oname)] = lens
+            sys.stdout.flush()
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+']:'+str(msg)
+
+    return yresult
+
+
+while 1:
+    exec_time = int(time.time())
+
+    if exec_time-pre_exec_time>300:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+']'
+
+        cmts_oid = {}
+
+        ora = ORA('nms@cnis')
+
+        if not ora.db:
+            print 'sleep 60secs ...'
+            time.sleep(60)
+            continue
+
+        # Get CMTS OID
+        SQL = "select name,upper(model) model,oid \
+               from nms.snmp_oid \
+               where name in ('CPU','Temperature')"
+        rst = ora.execall(SQL)
+        if rst is not None and len(rst)>0:
+            for aw in rst:
+                try:
+                    xname = aw[0]
+                    xmodel = aw[1]
+                    xoid = aw[2]
+                    if xmodel is None:
+                        xmodel = 'X'
+                    cmts_oid[xname+'-'+xmodel] = xoid
+                except Exception, msg:
+                    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                    print '['+nowdate+']:'+str(msg)
+        else:
+            print "Error: SNMP_OID is empty"
+            if ora.db:
+                ora.se_close()
+            print 'sleep 60secs ...'
+            time.sleep(60)
+            continue
+
+        cmts_so={}
+        cmts_id={}
+        cmts_ip={}
+        cmts_comm={}
+        cmts_model={}
+        cmts_cnt = 0
+
+        cmtssql = "select a.companyno,a.cmts_id,a.ip,a.snmp_ro, \
+                   case \
+                     when upper(b.maker||b.model) like '%%UBR%%' then 'UBR' when upper(b.maker||b.model) like '%%CASA%%' then 'CASA' \
+                     when upper(b.maker||b.model) like '%%CUDA%%' then 'CUDA' when upper(b.maker||b.model) like '%%MOTO%%' then 'MOTO' else NULL end type \
+                   from cmts a \
+                   inner join sys_object b on b.ne_id=substr(a.cmts_id,-8,4) and b.stopyn='N' \
+                   where \
+                   a.ip is not NULL and a.snmp_ro is not NULL and a.stopyn='N' \
+                   order by a.companyno,a.cmts_id asc"
+        rs1 = ora.execall(cmtssql)
+        if rs1 is not None and len(rs1)>0:
+            for aw in rs1:
+                cmts_so[cmts_cnt] = aw[0]
+                cmts_id[cmts_cnt] = aw[1]
+                cmts_ip[cmts_cnt] = aw[2]
+                cmts_comm[cmts_cnt] = aw[3]
+                cmts_model[cmts_cnt] = aw[4]
+                cmts_cnt = cmts_cnt+1
+
+        cmts_idx = 0
+        while cmts_idx<cmts_cnt:
+            try:
+                xso = cmts_so[cmts_idx]
+                xcmtsid = cmts_id[cmts_idx]
+                xIP = cmts_ip[cmts_idx]
+                xcomm = cmts_comm[cmts_idx]
+                xmodel = cmts_model[cmts_idx]
+
+                #nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                #print '['+nowdate+']', xso, xcmtsid, xIP, xcomm, xmodel
+                print xso, xcmtsid, xIP, xcomm, xmodel
+
+                if xmodel=='CASA':
+                    temp_div = 10
+                elif xmodel=='UBR':
+                    temp_div = 1
+                else:
+                    cmts_idx = cmts_idx+1
+                    print 'Pass'
+                    continue
+
+                cpu_mib = "%s" % (cmts_oid['CPU-'+xmodel])
+                temp_mib = "%s" % (cmts_oid['Temperature-'+xmodel])
+
+                rets = agent.snmpget([xIP, '-c', xcomm, cpu_mib])
+                if rets is not None and rets[0][1]!='':
+                    xcpu = int(rets[0][1])
+                else:
+                    xcpu = -1
+
+                rets = agent.snmpget([xIP, '-c', xcomm, temp_mib])
+                if rets is not None and rets[0][1]!='':
+                    xtemp = int(rets[0][1])/temp_div
+                else:
+                    xtemp = -1
+
+                SQL = "update cmts set cpu=%d,tpt=%d,synctime=sysdate where companyno='%s' and cmts_id='%s'" % (xcpu, xtemp, xso, xcmtsid)
+                print SQL
+                ora.execone(SQL)
+                ora.commit()
+                sys.stdout.flush()
+
+            except Exception, detail:
+                print '['+nowdate+']', xso, xcmtsid, detail
+
+            ora.commit()
+            sys.stdout.flush()
+            cmts_idx = cmts_idx+1
+
+        if ora.db:
+            ora.se_close()
+
+        pre_exec_time = exec_time
+
+    print 'sleep 30secs ...'
+    time.sleep(30)
+sys.exit(0)

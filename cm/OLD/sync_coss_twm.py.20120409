@@ -1,0 +1,160 @@
+#!/usr/bin/env python
+# -*- coding: Big5 -*-
+import sys
+import os
+import string
+import time
+import binascii
+import threading
+import pymssql
+from pysnmp.error import PySnmpError
+from pysnmpclass import snmpclass
+from oraclass import ORA
+
+cmstatus_mib = '.1.3.6.1.2.1.10.127.1.3.3.1.9'
+thread_cnt = 0
+status_arr = {}
+thread_arr = {}
+loop = 0
+
+CossMSDB = ['kbroCossMS_CP950','CossMS_CG_CP950','TFMCossMS_CP950']
+
+
+
+def query_status(loop, cmidx, ip):
+    global cmstatus_mib, thread_cnt, status_arr
+    thread_cnt = thread_cnt+1
+    try:
+        mib = "%s.%d" % (cmstatus_mib, cmidx)
+        agt = snmpclass(version='v1',community='NMS_Snmp',ptimeout=2,pretries=2,debug=0)
+        rets = agt.snmpget([ip, '-c', 'NMS_Snmp', mib])
+        print ip+': '+mib
+        if rets is not None and rets[0][1]!='':
+            status_arr['STATUS-'+str(loop)] = int(rets[0][1])
+        else:
+            status_arr['STATUS-'+str(loop)] = -1
+    except Exception, msg:
+        print msg
+        status_arr['STATUS-'+str(loop)] = None
+        pass
+    thread_cnt = thread_cnt-1
+
+
+
+for db in CossMSDB:
+    print db
+
+    sql = "select companyno,subsid,singlesn from ms0200 with (nolock) \
+           where subsname='台灣大哥大股份有限公司' and servicename in ('2 cm') and custstatus in ('0 未收','1 正常','8 欠費中') order by companyno,subsid";
+
+    try:
+        con = pymssql.connect(dsn='%s@%s') % ('cnis_web',db)
+        cur = con.cursor()
+
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+']:'+str(msg)
+        sys.exit(0)
+
+
+    try:
+        cur.execute(sql)
+        xarr = cur.fetchall()
+        for ms_row in xarr:
+            companyno = ms_row[0]
+            subsid = ms_row[1]
+            singlesn = ms_row[2]
+            print companyno,subsid,singlesn
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+']:'+str(msg)
+
+
+
+'''
+try:
+    ora = ORA('nms_cm/nms_cm@nmsdb')
+except Exception, msg:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+']:'+str(msg)
+    sys.exit(0)
+
+
+
+cmts_array = {}
+SQL = "select ip,cmts_id from CMTS"
+rs1 = ora.execall(SQL)
+reclen = len(rs1)
+if rs1 is not None and reclen>0:
+    for aw in rs1:
+        ip = aw[0]
+        cmtsid = aw[1]
+        print ip,cmtsid
+        cmts_array[cmtsid] = ip
+
+
+while 1:
+    cmtssql = "select a.so,a.cmts_id,a.cmmac,a.idx from outdoor_cm c,CMMAC a where a.cmmac=c.cmmac and a.cmts_id is not null and a.synctime<sysdate-(3/(24*60)) and rownum<50"
+    rs1 = ora.execall(cmtssql)
+    reclen = len(rs1)
+    if rs1 is not None and reclen>0:
+        for aw in rs1:
+            so = aw[0]
+            cmts_id  = aw[1]
+            cmmac = aw[2]
+            try:
+                cmts_ip  = cmts_array[cmts_id]
+            except Exception, msg:
+                #nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                #print '['+nowdate+']:'+str(msg)
+                pass
+                SQL = "update CMMAC set status=-1,synctime=sysdate,cmts_id='' where cmmac='%s'" % (cmmac)
+                print SQL
+                try:
+                    ora.execone(SQL)
+                except Exception, msg:
+                    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                    print '['+nowdate+']:'+str(msg)
+                    pass
+                continue
+            if aw[3] is not None:
+                cm_idx  = int(aw[3])
+            else:
+                cm_idx  = -1
+            status_arr['STATUS-'+str(loop)] = None
+            status_arr['SO-'+str(loop)] = so
+            status_arr['CMTS-'+str(loop)] = cmts_id
+            status_arr['MAC-'+str(loop)] = cmmac
+            status_arr['IP-'+str(loop)] = cmts_ip
+            thread_arr[loop] = threading.Thread(target = query_status, args = (loop, cm_idx, cmts_ip,))
+            thread_arr[loop].start()
+            loop = loop+1
+        sys.stdout.flush()
+    else:
+        break
+
+    i = 0
+    while i<loop:
+        SQL = ''
+        if status_arr['STATUS-'+str(i)] is not None and status_arr['STATUS-'+str(i)]>0:
+            SQL = "update CMMAC set synctime=sysdate,status='%d' where so='%s' and cmts_id='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(i)], status_arr['SO-'+str(i)], status_arr['CMTS-'+str(i)], status_arr['MAC-'+str(i)])
+            status_arr['STATUS-'+str(i)] = None
+        elif status_arr['STATUS-'+str(i)] is not None and status_arr['STATUS-'+str(i)]<0:
+            SQL = "update CMMAC set status=-1,synctime=sysdate where so='%s' and cmts_id='%s' and cmmac='%s'" % (status_arr['SO-'+str(i)], status_arr['CMTS-'+str(i)], status_arr['MAC-'+str(i)])
+            status_arr['STATUS-'+str(i)] = None
+        if SQL!='':
+            print str(i) + ': ' + SQL
+            try:
+                ora.execone(SQL)
+            except Exception, msg:
+                nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                print '['+nowdate+']:'+str(msg)
+                pass
+        i = i+1
+    ora.commit()
+    time.sleep(1)
+if ora is not None:
+    ora.se_close()
+sys.exit(0)
+
+'''

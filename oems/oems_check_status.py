@@ -1,0 +1,115 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+import os,sys,time
+from telnetlib import Telnet
+from oraclass import ORA
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "=> [%s]" % (tme)
+
+oracon = ORA('OEMS@KBRO_NMSDB')
+oracon2 = ORA('NMS@CNIS')
+
+msg = "OFFLINE MAC Delete["
+
+qrysql = "select a.sid,a.impact_list from oems_tickets_main a  \
+          where  a.normal_flag='Y' and a.impact_list is not null \
+          and a.status = '5013' \
+          and (a.bg_date - sysdate between -5/(24*60) and 5/(24*60) or \
+          a.end_date - sysdate between -5/(24*60) and 5/(24*60) or sysdate > a.bg_date) and sysdate >= a.end_date"
+try:
+    rs = oracon.execall(qrysql)
+    if rs is not None and len(rs) > 0:
+        for row in rs:
+            sid = row[0]
+            cmts_id = row[1]
+
+            ###先變更狀態
+            uptsql = "UPDATE oems_tickets_main set status='5018' where sid='%s'" % (str(sid))
+            try:
+                oracon.execone(uptsql)
+            except Exception, detail:
+                print '%s,(%s) -> %s' % (uptsql, sid, detail)
+            oracon.commit()
+
+            inssql = "INSERT INTO oems_tickets_log(SID, status_date, orig_status, status, descr, ACCOUNT) values('%s',SYSDATE,'5013','5018','系統自動更新','OEMS_PY')" % (str(sid))
+            try:
+                oracon.execone(inssql)
+            except Exception, detail:
+                print '%s,(%s) -> %s' % (inssql, sid, detail)
+            oracon.commit()
+
+            if cmts_id is not None:
+                cmts_ary = cmts_id.split(',')
+                for cmts in cmts_ary:
+                    sql = "select companyno,cmts_id,type,ip,account,passwd,enpasswd from cmts where cmts_id='%s'" % (cmts)
+                    print sql
+                    rs2 = oracon2.execall(sql)
+                    if rs2 is not None and len(rs2) > 0:
+                        for row2 in rs2:
+                            try:
+                                tn = Telnet()
+                                try:
+                                    tn.open(row2[3], 23)
+                                except Exception, detail:
+                                    print   "Cannot open host:" + str(detail)
+                                    msg += cmts + ':Connection refused;'
+                                    break
+
+                                if row2[4] is not None:
+                                    tn.read_until('Username:', 10)
+                                    tn.write(row2[4] + "\n")
+
+                                tn.read_until('Password:', 10)
+                                tn.write(row2[5] + "\n")
+                                tn.read_until('>', 10)
+                                tn.write('en' + "\n")
+                                tn.read_until('Password:', 10)
+                                tn.write(row2[6] + "\n")
+                                tn.read_until('#', 10)
+
+                                if (row2[2].find('UBR') > -1):
+                                    tn.write("clear cable modem offline delete\n")
+                                elif (row2[2].find('CASA') > -1):
+                                    tn.write("clear cable modem offline\n")
+                                else:
+                                    #logf(data2['companyno'], data2['cmts_id'], 'Unknown model')
+                                    print '[No Data]'
+
+                                tn.read_until('#', 10)
+                                tn.write("exit\n")
+                                tn.close()
+
+                                msg += cmts + ':OK;'
+                            except Exception, detail:
+                                msg += cmts + ':ERROR-'+str(detail)+';'
+                                print '[Error]: '+ str(detail)
+                    else:
+                        msg += cmts + ':ERROR-Not Found;'
+
+                msg += ']'
+                print msg
+                #if msg is not None:
+
+                inssql = "INSERT INTO oems_tickets_log(SID, status_date, orig_status, status, descr, ACCOUNT) values('%s',SYSDATE,'5018','5018','%s','OEMS_PY')" % (str(sid),msg)
+                try:
+                    oracon.execone(inssql)
+                except Exception, detail:
+                    print '%s,(%s) -> %s' % (inssql, sid, detail)
+                oracon.commit()
+except Exception, detail:
+    print '[Select Error]: '+ str(detail)
+
+fdsql = "begin PROC_OEMS_CHECK_STATUS; end;"
+rs = oracon.execone(fdsql)
+
+if oracon is not None:
+    oracon.se_close()
+
+if oracon2 is not None:
+    oracon2.se_close()

@@ -1,0 +1,210 @@
+<?php
+  /*
+    請使用UTF-8 without BOM編碼
+    Written by Karen 2014.6.9
+  */
+  //include_once('smarty.inc.php');
+  include_once('common.inc.php');
+  //session_start();
+
+
+  $dbh_event = GetDBH('KBRO_NMSDB','EVENT');
+  $dbh_coss = GetDBH('KBRO_NMSDB','COSS');
+  $dbh = GetDBH('CNIS');
+  $dbh_isc = GetDBH('ISC_M');
+  $kbro_coss = GetDBH('kbroCossMS');
+  $cg_coss = GetDBH('CGCossMS');
+
+
+  $now = date("Y-m-d H:i:s");
+  echo "START: $now\n";
+
+  # 現在時間 + 600秒, 來取得設定時間及日期
+  $time = date('Y/m/d H:i:s',mktime(date('H'), date('i'), date('s')+600, date('m'), date('d'), date('Y')));
+  echo 'Now + 600sec ='.$time."<br>\n";
+
+  $week = date("w",mktime(date('H'), date('i'), date('s')+600, date('m'), date('d'), date('Y')));
+
+  $hour = date("H",mktime(date('H'), date('i'), date('s')+600, date('m'), date('d'), date('Y')));
+
+  if ($week == '0')
+    $week = 7;
+  echo 'hour:'.$hour."<br>\n";
+
+  $hr_v = 'h'.((int)$hour+1);
+  $iscAry = array();
+
+  $sql = "select companyno,isc from so";
+  $sth = oci_parse($dbh,$sql);
+  oci_execute($sth);
+  while($row = oci_fetch_assoc($sth)){
+
+    if ($row['ISC'] == 'allot'){
+      $table = 'custdata_allot';
+    }elseif ($row['ISC'] == 'procera'){
+      $table = 'custdata_procera';
+    }
+    $iscAry[$row['COMPANYNO']] = $table;
+
+  }
+
+  // LOCK
+  $sql = "mysql lock table custdata_procera write, custdata_allot write";
+  echo "$sql\n";
+  mysql_query($sql, $dbh_isc);
+
+  ##更新時段設定
+  $qsql = "select trim(a.soid) soid,a.subsid, $hr_v hrs from cm_set a, cm_time b where a.subsid=b.subsid and a.cmset='B' and b.weekday='$week' and a.stopyn='N'";
+  echo $qsql."<br>\n";
+  $sth = oci_parse($dbh_event,$qsql);
+  oci_execute($sth);
+  while($row = oci_fetch_assoc($sth)){
+      $companyno = $row['SOID'];
+      $subsid = $row['SUBSID'];
+      $block = $row['HRS'];
+      if ($block=='N')
+          $block_flag = 'Y';
+      else
+          $block_flag = 'N';
+
+      if (!empty($companyno)){
+        $qry = "select companyno,subsid,servicename,custstatus,singlesn,packagename,billitem,swversion from ms0200 with(Nolock) where subsid='$subsid'";
+        if ($companyno == '106')
+          $qrysth = mssql_query($qry,$cg_coss);
+        else
+          $qrysth = mssql_query($qry,$kbro_coss);
+
+        while($qryrow = mssql_fetch_assoc($qrysth)){
+           $companyno = $qryrow['companyno'];
+           $servicename = $qryrow['servicename'];
+           $custstatus  = $qryrow['custstatus'];
+           $singlesn    = $qryrow['singlesn'];
+           $packagename = $qryrow['packagename'];
+           $billitem    = $qryrow['billitem'];
+           $swversion    = $qryrow['swversion'];
+           $hv = 'N';
+        }
+      }
+
+      $upd_sql = "update cm_status set redirect_block='$block_flag' where subsid='$subsid' and companyno='$companyno'";
+      $uptsth = oci_parse($dbh_coss,$upd_sql);
+      oci_execute($uptsth);
+      $upd_sql2 = "insert into cm_time_seting_log(soid,subsid,func,updatetime) values('$companyno','$subsid','$block_flag',sysdate)";
+      $uptsth = oci_parse($dbh_event,$upd_sql2);
+      oci_execute($uptsth);
+
+
+
+
+      if (!empty($iscAry[$companyno])){
+        $upt = "insert into $iscAry[$companyno] (companyno,subsid,servicename,custstatus,singlesn,billitem,hv,updatetime,wait4sync,timeblock,swversion) values
+        ('$companyno','$subsid','$servicename','$custstatus','$singlesn','$billitem','$hv',now(),'Y','$block_flag','$swversion') on duplicate key
+        update servicename=values(servicename),custstatus=values(custstatus),singlesn=values(singlesn),billitem=values(billitem),updatetime=values(updatetime),
+        wait4sync=values(wait4sync),timeblock=values(timeblock),swversion=values(swversion)";
+
+        if ($companyno == '210' || $companyno == '220' || $companyno == '230'){
+          $upt2 = "insert into custdata_allot (companyno,subsid,servicename,custstatus,singlesn,billitem,hv,updatetime,wait4sync,timeblock,swversion) values
+          ('$companyno','$subsid','$servicename','$custstatus','$singlesn','$billitem','$hv',now(),'Y','$block_flag','$swversion') on duplicate key
+          update servicename=values(servicename),custstatus=values(custstatus),singlesn=values(singlesn),billitem=values(billitem),updatetime=values(updatetime),
+          wait4sync=values(wait4sync),timeblock=values(timeblock),swversion=values(swversion)";
+          print 'upt2'.$upt2."<br>\n";
+          @mysql_query($upt2,$dbh_isc);
+        }
+
+        @mysql_query($upt,$dbh_isc);
+
+      }
+      //print 'B-cm_status:'.$upd_sql."<br>\n";
+      //print 'B-cm_time_seting_log:'.$upd_sql2."<br>\n";
+      //print 'B-isc:'.$upt."<br>\n";
+      print 'B-cm_status:'.$companyno.':'.$subsid.':'.$block_flag.';B-isc:'.$companyno.':'.$subsid.':'.$block_flag."<br>\n";
+
+
+  }
+
+  #更新一般設定 (I,Y)
+  $qsql = "select trim(a.soid) soid,a.subsid,a.cmset,a.type from cm_set a where a.cmset='I' and a.type in ('Y','N') and a.stopyn='N'";
+  //$qsql = "select a.soid,a.subsid,a.type,b.cmmac from cm_set a, coss.cm_status b where a.subsid=b.subsid and a.cmset='I' and ((a.type='Y' and b.redirect_block='Y') or (a.type<>'Y' and (b.redirect_block!='Y' or b.redirect_block is null)))";
+  //echo $qsql."<br>\n";
+  $sth = oci_parse($dbh_event,$qsql);
+  oci_execute($sth);
+  while($row = oci_fetch_assoc($sth)){
+    $companyno = $row['SOID'];
+    $subsid = $row['SUBSID'];
+    $type = $row['TYPE'];
+    $cmset = $row['CMSET'];
+    if ($type=='Y'){
+        $block_flag='N';
+        $func = 'N';
+    }else{
+        $block_flag='Y';
+        $func = 'Y';
+    }
+
+    if (!empty($companyno)){
+      $qry = "select companyno,subsid,servicename,custstatus,singlesn,packagename,billitem,swversion from ms0200 with(Nolock) where subsid='$subsid'";
+      if ($companyno == '106')
+        $qrysth = mssql_query($qry,$cg_coss);
+      else
+        $qrysth = mssql_query($qry,$kbro_coss);
+
+      while($qryrow = mssql_fetch_assoc($qrysth)){
+         $companyno = $qryrow['companyno'];
+         $servicename = $qryrow['servicename'];
+         $custstatus  = $qryrow['custstatus'];
+         $singlesn    = $qryrow['singlesn'];
+         $packagename = $qryrow['packagename'];
+         $billitem    = $qryrow['billitem'];
+         $swversion   = $qryrow['swversion'];
+         $hv = 'N';
+      }
+    }
+
+
+    $upd_sql = "update cm_status set redirect_block='$block_flag' where subsid='$subsid' and companyno='$companyno'";
+    $uptsth = oci_parse($dbh_coss,$upd_sql);
+    oci_execute($uptsth);
+    $upd_sql2 = "insert into cm_time_seting_log(soid,subsid,cmmac,func,updatetime) values('$companyno','$subsid','$cmmac','$func',sysdate)";
+    $uptsth = oci_parse($dbh_event,$upd_sql2);
+    oci_execute($uptsth);
+
+
+
+    if (!empty($iscAry[$companyno])){
+      $upt = "insert into $iscAry[$companyno] (companyno,subsid,servicename,custstatus,singlesn,billitem,hv,updatetime,wait4sync,timeblock,swversion) values
+      ('$companyno','$subsid','$servicename','$custstatus','$singlesn','$billitem','$hv',now(),'Y','$block_flag','$swversion') on duplicate key
+      update servicename=values(servicename),custstatus=values(custstatus),singlesn=values(singlesn),billitem=values(billitem),updatetime=values(updatetime),
+      wait4sync=values(wait4sync),timeblock=values(timeblock),swversion=values(swversion)";
+
+      if ($companyno == '210' || $companyno == '220' || $companyno == '230'){
+        $upt2 = "insert into custdata_allot (companyno,subsid,servicename,custstatus,singlesn,billitem,hv,updatetime,wait4sync,timeblock,swversion) values
+        ('$companyno','$subsid','$servicename','$custstatus','$singlesn','$billitem','$hv',now(),'Y','$block_flag','$swversion') on duplicate key
+        update servicename=values(servicename),custstatus=values(custstatus),singlesn=values(singlesn),billitem=values(billitem),updatetime=values(updatetime),
+        wait4sync=values(wait4sync),timeblock=values(timeblock),swversion=values(swversion)";
+      }
+
+      @mysql_query($upt,$dbh_isc);
+      @mysql_query($upt2,$dbh_isc);
+    }
+
+    //print 'I-cm_status:'.$upd_sql."<br>\n";
+    //print 'I-cm_time_seting_log:'.$upd_sql2."<br>\n";
+    //print 'I-isc:'.$upt."<br>\n";
+    print 'I-cm_status:'.$companyno.':'.$subsid.':'.$block_flag.';I-isc:'.$companyno.':'.$subsid.':'.$block_flag."<br>\n";
+
+  }
+
+  // UNLOCK
+  $sql = "mysql unlock tables";
+  echo "$sql\n";
+  mysql_query($sql, $dbh_isc);
+
+  oci_close($dbh_event);
+  oci_close($dbh_coss);
+  oci_close($dbh);
+  mysql_close($dbh_isc);
+  mssql_close($kbro_coss);
+
+  $now = date("Y-m-d H:i:s");
+  echo "END: $now\n\n";
+?>

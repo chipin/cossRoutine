@@ -1,0 +1,196 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+import os,sys,time,re
+import cossdb,pymssql
+from oraclass import ORA
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+
+def append_lac(xso, xtel):
+    if xtel is None or xtel=='':
+        return ''
+    xtel = xtel.replace("*","")
+    if xso=='300' or xso=='310' or xso=='330':
+        lac = '03'
+    elif xso=='410' or xso=='420':
+        lac = '04'
+    elif xso=='610':
+        lac = '06'
+    elif xso=='701':
+        lac = '07'
+    elif xso=='810' or xso=='820':
+        lac = '08'
+    else:
+        lac = '02'
+    return '%s%s' % (lac, xtel)
+
+
+if len(sys.argv) != 2:
+    print 'usage:',sys.argv[0],'CompanyNo'
+    sys.exit(0)
+else:
+    so = sys.argv[1]
+
+if re.match(r"^\d{3}$", so) is not None:
+    sosql = "'%s'" % (so)
+else:
+    print 'usage:',sys.argv[0],'CompanyNo'
+    sys.exit(0)
+
+if so in ['101','103','104','300','701']:
+    db_host = 'TFMCossMS'
+elif so in ['210','220','230','240','250','260','310','330','410','420','610','810','820']:
+    db_host = 'kbroCossMS'
+elif so in ['106']:
+    db_host = 'CossMS_CG'
+else:
+    print 'usage:',sys.argv[0],'CompanyNo'
+    sys.exit(0)
+
+if db_host == 'TFMCossMS':
+    oracoss = ORA('coss@cnis')
+    if not oracoss.db:
+        print 'Error: Unable to connect to [COSS@CNIS]'
+        sys.exit(0)
+else:
+    oracoss = ORA('coss@kbro_nmsdb')
+    if not oracoss.db:
+        print 'Error: Unable to connect to [COSS@KBRO_NMSDB]'
+        sys.exit(0)
+
+
+yymmdd = time.strftime("%Y%m%d", time.localtime())
+year = int(yymmdd[:4])
+month = int(yymmdd[4:6])
+day = int(yymmdd[6:8])
+
+ydate = time.localtime(time.mktime((year,month,day,0,0,0,-1,-1,-1))-86400*14)
+target_day = "%d/%.2d/%.2d" % (ydate[0], ydate[1], ydate[2])
+
+ydate = time.localtime(time.mktime((year,month,day,0,0,0,-1,-1,-1)))
+target_day_end = "%d/%.2d/%.2d" % (ydate[0], ydate[1], ydate[2])
+
+#print 'target_day:',target_day,'~',target_day_end
+
+
+nowtime = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s] START" % (nowtime)
+
+try:
+    con = pymssql.connect(host=db_host,user=cossdb.account,password=cossdb.passwd,database='cossdb')
+    cur = con.cursor()
+except Exception, msg:
+    print 'Error: Unable to connect to ['+db_host+']'
+    sys.exit(0)
+
+qrySQL = "select a.companyno,a.subsid,a.invoice,a.acctcno,a.invtextpath,convert(varchar(19),a.invtexttime,20) invtexttime,b.cellphone01,b.cellphone02,b.telenum01,b.telenum02,b.telenum03,b.email,a.invamt+a.invtax invamt,convert(varchar(10),a.invdate,111) invdate,convert(nvarchar,b.subsname) subsname,b.contactmode from ms4000 a with (nolock),ms0200 b with (nolock) where a.companyno=b.companyno and a.subsid=b.subsid and a.companyno in (%s) and a.createtime between '%s 00:00:00' and '%s 20:00:00' and a.invcode = '35' and a.einvyn='Y' and a.exportdate<>'' and a.exportdate is not null and (a.invtextyn='N' or a.invtextyn='' or a.invtextyn is null) and a.invamt > 0 and a.taxkind != 'D 作廢'" % (sosql, target_day, target_day_end)
+print qrySQL
+cur.execute(qrySQL)
+while 1:
+    curarr = cur.fetchmany(100)
+    if curarr:
+        for i in range(0, len(curarr)):
+            so = curarr[i][0]
+            subsid = int(curarr[i][1])
+            invoice = curarr[i][2]
+            acc_so = curarr[i][3]
+            invtextpath = curarr[i][4]
+            if invtextpath is None:
+                invtextpath = ''
+            invtexttime = curarr[i][5]
+            if invtexttime is None:
+                updtime_sql = "to_date(NULL)"
+            else:
+                updtime_sql = "to_date('%s','yyyy-mm-dd hh24:mi:ss')" % (invtexttime)
+
+            mobile1 = curarr[i][6]
+            mobile2 = curarr[i][7]
+            mobile = ''
+            if mobile!='' and mobile1 is not None and len(mobile1)<=10 and mobile1<>'0900000000' and mobile1[:2]=='09':
+                mobile = "%s,%s" % (mobile, mobile1[:10])
+            elif mobile1 is not None and len(mobile1)<=10 and mobile1<>'0900000000' and mobile1[:2]=='09':
+                mobile = "%s" % (mobile1[:10])
+            if mobile!='' and mobile2 is not None and len(mobile2)<=10 and mobile2<>'0900000000' and mobile2[:2]=='09':
+                mobile = "%s,%s" % (mobile, mobile2[:10])
+            elif mobile2 is not None and len(mobile2)<=10 and mobile2<>'0900000000' and mobile2[:2]=='09':
+                mobile = "%s" % (mobile2[:10])
+
+            tel1 = append_lac(so, curarr[i][8])
+            tel2 = append_lac(so, curarr[i][9])
+            tel3 = append_lac(so, curarr[i][10])
+            tel = ''
+            if tel!='' and tel1 is not None and len(tel1)>=5 and len(tel1)<=10 and tel1[:2]<>'09':
+                tel = "%s,%s" % (tel, tel1[:10])
+            elif tel1 is not None and len(tel1)>=5 and len(tel1)<=10 and tel1[:2]<>'09':
+                tel = "%s" % (tel1[:10])
+            if tel!='' and tel2 is not None and len(tel2)>=5 and len(tel2)<=10 and tel2[:2]<>'09':
+                tel = "%s,%s" % (tel, tel2[:10])
+            elif tel2 is not None and len(tel2)>=5 and len(tel2)<=10 and tel2[:2]<>'09':
+                tel = "%s" % (tel2[:10])
+            if tel!='' and tel3 is not None and len(tel3)>=5 and len(tel3)<=10 and tel3[:2]<>'09':
+                tel = "%s,%s" % (tel, tel3[:10])
+            elif tel3 is not None and len(tel3)>=5 and len(tel3)<=10 and tel3[:2]<>'09':
+                tel = "%s" % (tel3[:10])
+
+            email = curarr[i][11]
+            if email is not None and len(email) > 0:
+                email = email.lower().strip()
+            if email is None or email[:4]=='000@' or '@' not in email or '@tfm' in email or '@kbronet' in email or re.match(r"^.{2,}@[^.]{2,}\.[^.]{2,}", email) is None:
+                email = ''
+            invamt = int(curarr[i][12])
+            invdate = curarr[i][13]
+            subsname = curarr[i][14]
+            contactmode = curarr[i][15]
+
+            email_status = email_updtime = sms_status = sms_updtime = ivr_status = ivr_updtime = 'null'
+            if contactmode != None and len(contactmode) > 0:
+                if 'EMAIL' in contactmode or '簡訊' in contactmode or '語音' in contactmode or '不通知' in contactmode:
+                    if 'EMAIL' in contactmode:
+                        email_status = "'YES'"
+                    if '簡訊' in contactmode:
+                        sms_status = "'YES'"
+                    if '語音' in contactmode:
+                        ivr_status = "'YES'"
+
+                    if email_status == 'null':
+                        email_status = "'NO'"
+                    if sms_status == 'null':
+                        sms_status = "'NO'"
+                    if ivr_status == 'null':
+                        ivr_status = "'NO'"
+
+                    email_updtime = sms_updtime = ivr_updtime = 'sysdate'
+
+            # Insert new data to making control status
+            p_sid = -1
+            qrySQL = "select sid from invoice_status where invoice='%s'" % (invoice)
+            print invoice,
+            o_rs = oracoss.execall(qrySQL)
+            if o_rs != None and len(o_rs) > 0:
+                for o_row in o_rs:
+                    p_sid = int(o_row[0])
+
+            if p_sid<0:
+                updSQL = "insert into invoice_status (so,acc_so,subsid,invoice,coss_status,coss_updtime,mobile,tele,email,inv_amount,inv_date,subsname,email_status,email_updtime,sms_status,sms_updtime,ivr_status,ivr_updtime) values ('%s','%s',%d,'%s','%s',%s,'%s','%s','%s',%d,to_date('%s','yyyy/mm/dd'),'%s',%s,%s,%s,%s,%s,%s)" % (so, acc_so, subsid, invoice, invtextpath, updtime_sql, mobile, tel, email, invamt, invdate, subsname, email_status,email_updtime,sms_status,sms_updtime,ivr_status,ivr_updtime)
+                print updSQL
+                try:
+                    oracoss.execone(updSQL)
+                    if (i%30)==0:
+                        oracoss.commit()
+                except Exception, msg:
+                    print 'Except:',str(msg)
+            else:
+                print 'PASS'
+            sys.stdout.flush()
+    else:
+        break
+oracoss.commit()
+oracoss.se_close()
+con.close()
+
+nowtime = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s] END" % (nowtime)

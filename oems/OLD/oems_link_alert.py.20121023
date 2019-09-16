@@ -1,0 +1,378 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+import sys, time, re
+import pymssql
+from oraclass import ORA
+
+if len(sys.argv) != 2:
+    print "Usage: %s [KBRO|CG|TFM]" % (sys.argv[0])
+    sys.exit(0)
+else:
+    so = sys.argv[1].upper()
+
+if so == 'KBRO':
+    con = pymssql.connect(dsn='cnis_web@kbroCossMS_CP950')
+    con_qry = pymssql.connect(dsn='cnis_web@kbroCossMS_CP950')
+elif so == 'CG':
+    con = pymssql.connect(dsn='cnis_web@CossMS_CG_CP950')
+    con_qry = pymssql.connect(dsn='cnis_web@CossMS_CG_CP950')
+elif so == 'TFM':
+    con = pymssql.connect(dsn='cnis_web@TFMCossMS_CP950')
+    con_qry = pymssql.connect(dsn='cnis_web@TFMCossMS_CP950')
+else:
+    print "Usage: %s [KBRO|CG|TFM]" % (sys.argv[0])
+    sys.exit(0)
+
+try:
+    cur = con.cursor()
+    cur_qry = con_qry.cursor()
+except:
+    print "Exception: Unable to connect CossMS [%s]" % (so)
+    sys.exit(0)
+
+oracon_oems = ORA('OEMS@KBRO_NMSDB')
+if not oracon_oems.db:
+    sys.exit(0)
+
+if so == 'TFM':
+    oracon_cti = ORA('CTI@CNIS')
+else:
+    oracon_cti = ORA('CTI@KBRO_NMSDB')
+if not oracon_cti.db:
+    sys.exit(0)
+
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s] %s START" % (tme, so)
+
+# 預設告警值
+kpi_name      = 'NODE+LINK'
+kpi_node_day  = 6
+kpi_node_hour = 4
+kpi_link_day  = 4
+kpi_link_hour = 2
+
+oraqrysql = "select name,node_day,node_hour,link_day,link_hour from kpi_coss_bomb where name in ('NODE+LINK','NODE') and stopyn='N' order by case when name='NODE+LINK' then 1 else 2 end"
+rs = oracon_oems.execall(oraqrysql)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+        kpi_name = a_row[0]
+        try:
+            kpi_node_day  = int(a_row[1])
+            kpi_node_hour = int(a_row[2])
+            kpi_link_day  = int(a_row[3])
+            kpi_link_hour = int(a_row[4])
+        except:
+            pass
+
+print kpi_name,kpi_node_day,kpi_node_hour,kpi_link_day,kpi_link_hour
+
+so_name = {}
+oraqrysql = "select name,id from oems_mapping where type='OPERATOR' and name is not null and rank is not null"
+rs = oracon_oems.execall(oraqrysql)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+       so_name[a_row[0]] = a_row[1]
+
+node_arr = {}
+
+for QQ in range(0, 2):
+    for WW in range(0, 2):
+        tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        netid_type = ''
+
+        if QQ == 0: # 1 day
+            EE = '1天'
+            if WW == 0: # NODE
+                query="select companyno,node,count(*) cnt from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-1 group by companyno,node having count(*) >= %d union select companyno,cast(subsid as varchar),-1 cnt from v_link_alert where substring(servicename,1,1) = '8' and createtime >= getdate()-1 group by companyno,subsid" % (kpi_node_day)
+                netid_type='NODE'
+                print "[%s] => 1 day by NODE included LS" % (tme)
+            #elif WW == 1: # NODE-LV0
+            #    query="select companyno,nodea,count(*) cnt from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-1 group by companyno,nodea having count(*) >= 8"
+            #    netid_type='LINK'
+            #    print "[%s] => 1 day by NODE-LV0" % (tme)
+            else: # LINK
+                if kpi_name != 'NODE+LINK':
+                    continue;
+                query="select companyno,link,count(*) cnt from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-1 group by companyno,link having count(*) >= %d" % (kpi_link_day)
+                netid_type='LINK'
+                print "[%s] => 1 day by LINK" % (tme)
+        else: # 1 hr
+            EE = '1小時'
+            if WW == 0: # NODE
+                query="select companyno,node,count(*) cnt from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-(63.0/(24*60)) group by companyno,node having count(*) >= %d" % (kpi_node_hour)
+                netid_type='NODE'
+                print "[%s] => 1 hour by NODE" % (tme)
+            #elif WW == 1: # NODE-LV0
+            #    query="select companyno,nodea,count(*) cnt from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-(1.0/24) group by companyno,nodea having count(*) in (4,5,6,7)"
+            #    netid_type='LINK'
+            #    print "[%s] => 1 hour by NODE-LV0" % (tme)
+            else: # LINK
+                if kpi_name != 'NODE+LINK':
+                    continue;
+                query="select companyno,link,count(*) cnt from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-(63.0/(24*60)) group by companyno,link having count(*) >= %d" % (kpi_link_hour)
+                netid_type='LINK'
+                print "[%s] => 1 hour by LINK" % (tme)
+
+        print query
+        #continue
+        cur.execute(query)
+        while 1:
+            curarr = cur.fetchmany(100)
+            if curarr:
+                xlen = len(curarr)
+                for ii in range(0, xlen):
+                    companyno = curarr[ii][0]
+                    netid = curarr[ii][1]
+                    alert_cnt = curarr[ii][2]
+                    print companyno,netid,alert_cnt
+                    worksheet_arr = []
+                    worksheet_str = ''
+                    service_count = {}
+                    if companyno and netid and alert_cnt > 0: # for non LS
+                        impact_str = "%s-%s" % (companyno, netid)
+
+                        if netid_type == 'LINK':
+                            ma = re.match(r"^(\w{5}\-\d{6,11})$", netid)
+                            if ma is not None:
+                                pass
+                            else:
+                                print "%s LINKID格式錯誤 => PASS" % (impact_str)
+                                continue
+
+                        if node_arr.has_key(impact_str) == True:
+                            print "%s 已有區障 => PASS" % (impact_str)
+                            continue
+                        node_arr[impact_str] = 9 # 需等震江工單結案, 才會自動結案
+
+                        if QQ == 0: # 1 day
+                            if WW == 0: # NODE
+                                sidqry="select servicename,worksheet,city,district,node from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-1 and companyno='%s' and node='%s'" % (companyno, netid)
+                            #elif WW == 1: # NODE-LV0
+                            #    sidqry="select servicename,worksheet,city,district,node from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-1 and companyno='%s' and nodea='%s'" % (companyno, netid)
+                            else: # LINK
+                                sidqry="select servicename,worksheet,city,district,node from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-1 and companyno='%s' and link='%s'" % (companyno, netid)
+                        else: # 1 hr
+                            if WW == 0: # NODE
+                                sidqry="select servicename,worksheet,city,district,node from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-(63.0/(24*60)) and companyno='%s' and node='%s'" % (companyno, netid)
+                            #elif WW == 1: # NODE-LV0
+                            #    sidqry="select servicename,worksheet,city,district,node from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-(1.0/24) and companyno='%s' and nodea='%s'" % (companyno, netid)
+                            else: # LINK
+                                sidqry="select servicename,worksheet,city,district,node from v_link_alert where substring(servicename,1,1) <> '8' and createtime >= getdate()-(63.0/(24*60)) and companyno='%s' and link='%s'" % (companyno, netid)
+                        print sidqry
+                        cur_qry.execute(sidqry);
+                        sidarr = cur_qry.fetchall()
+                        for ssid in sidarr:
+                            srv = ssid[0]
+                            if service_count.has_key(srv) == False:
+                                service_count[srv] = 0
+                            service_count[srv] = service_count[srv] + 1
+                            wrk = ssid[1]
+                            if wrk not in worksheet_arr:
+                                worksheet_arr.append(wrk)
+                            district = "%s-%s" % (ssid[2], ssid[3])
+                            nodeno = ssid[4]
+
+                        impact_str2 = "%s-%s" % (companyno, nodeno)
+                        if netid_type == 'LINK':
+                            if node_arr.has_key(impact_str2) == True:
+                                print "%s => %s 已有區障 => PASS" % (impact_str, impact_str2)
+                                continue
+
+                        reason_str = "網點# %s %s內已有[%d]戶報修" % (netid, EE, alert_cnt)
+                        for kk, vv in service_count.items():
+                            reason_str = "%s, %s共%d件" % (reason_str, kk, vv)
+
+                        # 新增障礙單
+                        sid = 0
+                        if netid_type == 'LINK':
+                            oraqrysql = "select sid from oems_tickets_main where ((type='3107' and subtype in (310701,310703)) or ticket_id is not null) and status<=5104 and (impact_list='%s' or impact_list='%s') and account='COSSv2'" % (impact_str, impact_str2)
+                        else:
+                            oraqrysql = "select sid from oems_tickets_main where ((type='3107' and subtype in (310701,310703)) or ticket_id is not null) and status<=5104 and impact_list='%s' and account='COSSv2'" % (impact_str)
+                        print oraqrysql
+                        rs = oracon_oems.execall(oraqrysql)
+                        if rs != None and len(rs) > 0:
+                            for a_row in rs:
+                                sid = a_row[0]
+                            oraupdsql = "update oems_tickets_main set reason='%s',descr='%s' where sid='%d'" % (reason_str, reason_str, sid)
+                        else:
+                            taipower_sid = ''
+                            subtype = 310701
+                            oraqrysql = "select sid from oems_tickets_main where reason='台電計畫性停電' and normal_flag='P' and sysdate between impact_bg_date and impact_end_date and operator='%d' and descr like '%%%s%%' order by create_date desc" % (so_name[companyno], nodeno)
+                            print oraqrysql
+                            rs = oracon_oems.execall(oraqrysql)
+                            if rs != None and len(rs) > 0:
+                                for a_row in rs:
+                                    taipower_sid = (int)(a_row[0])
+                                    subtype = 310703
+                                    break
+                            oraupdsql = "insert into oems_tickets_main(status,type,subtype,reason,descr,create_date,operator,account,normal_flag,impact_list,location) \
+                                         values('5100',3107,'%d','%s','%s',sysdate,'%s','COSSv2','B','%s','%s')" % (subtype, reason_str, reason_str, so_name[companyno], impact_str, taipower_sid)
+                        print oraupdsql
+                        try:
+                            oracon_oems.execone(oraupdsql)
+                            oracon_oems.commit()
+                            #pass
+                        except:
+                            print 'Exception: Unable to update OEMS_TICKETS_MAIN'
+
+                        # 新增影響範圍
+                        if sid == 0:
+                            oraqrysql = "select sid from oems_tickets_main where type='3107' and subtype in (310701,310703) and status <= 5104 and impact_list='%s' and account='COSSv2' order by create_date desc" % (impact_str)
+                            rs = oracon_oems.execall(oraqrysql)
+                            if rs != None and len(rs) > 0:
+                                for a_row in rs:
+                                    sid = a_row[0]
+                                    break
+                                oraupdsql = "insert into oems_impact (sid,type,value,companyno,node,area) values ('%d','%s','%s','%s','%s','%s')" % (sid, netid_type, netid, companyno, nodeno, district)
+                                print oraupdsql
+                                try:
+                                    oracon_oems.execone(oraupdsql)
+                                    oracon_oems.commit()
+                                    #pass
+                                except:
+                                    print 'Exception: Unable to insert OEMS_IMPACT'
+
+                        # update CTI010 via WorkSheetNo
+                        if worksheet_arr:
+                            worksheet_str = "','" . join(worksheet_arr)
+                        print 'worksheet:',worksheet_arr
+                        if worksheet_str != None and len(worksheet_str) > 0 and sid != None and sid > 0:
+                            oraupdsql = "update cti010 set ext_oems_id='%d' where so='%d' and coss_id in ('%s') and coss_id is not null and (ext_oems_id is null or ext_oems_id = 0)" % (sid, int(companyno), worksheet_str)
+                            print oraupdsql
+                            try:
+                                oracon_cti.execone(oraupdsql)
+                                oracon_cti.commit()
+                                #pass
+                            except:
+                                print 'Exception: Unable to update CTI010'
+
+                    elif companyno and netid and alert_cnt == -1: #  for 8 LS, 告警是以訂編為單位
+                        sidqry="select subsid,custname,worksheet,node,link from v_link_alert where substring(servicename,1,1) = '8' and createtime >= getdate()-1 and companyno='%s' and subsid='%s'" % (companyno, netid)
+                        cur_qry.execute(sidqry);
+                        sidarr = cur_qry.fetchall()
+                        for ssid in sidarr:
+                            subsid = ssid[0]
+                            custname = ssid[1]
+                            nodeno = ssid[3]
+                            linkid = ssid[4]
+                            wrk = ssid[2]
+                            if wrk not in worksheet_arr:
+                                worksheet_arr.append(wrk)
+
+                        reason_str = "網點# %s 已有專線用戶報修, 訂戶編號: %d, 名稱: %s" % (linkid, subsid, custname)
+                        impact_str = "%s-%s" % (companyno, subsid)
+                        #node_arr[impact_str] = 9 # LS障礙不需等震江工單結案, 就可以自動結案
+
+                        # 新增障礙單
+                        sid = 0
+                        oraqrysql = "select sid from oems_tickets_main where ((type='3110' and subtype in (311001,311003)) or ticket_id is not null) and status<=5104 and impact_list='%s' and account='COSSv2'" % (impact_str)
+                        print oraqrysql
+                        rs = oracon_oems.execall(oraqrysql)
+                        if rs != None and len(rs) > 0:
+                            for a_row in rs:
+                                sid = a_row[0]
+                        else:
+                            taipower_sid = ''
+                            subtype = 311001
+                            oraqrysql = "select sid from oems_tickets_main where reason='台電計畫性停電' and normal_flag='P' and sysdate between impact_bg_date and impact_end_date and operator='%d' and descr like '%%%s%%' order by create_date desc" % (so_name[companyno], nodeno)
+                            print oraqrysql
+                            rs = oracon_oems.execall(oraqrysql)
+                            if rs != None and len(rs) > 0:
+                                for a_row in rs:
+                                    taipower_sid = (int)(a_row[0])
+                                    subtype = 311003
+                                    break
+                            oraupdsql = "insert into oems_tickets_main(status,type,subtype,reason,descr,create_date,operator,account,normal_flag,impact_list,location) \
+                                         values('5100',3110,'%d','%s','%s',sysdate,'%s','COSSv2','B','%s','%s')" % (subtype, reason_str, reason_str, so_name[companyno], impact_str, taipower_sid)
+                            print oraupdsql
+                            try:
+                                oracon_oems.execone(oraupdsql)
+                                oracon_oems.commit()
+                                #pass
+                            except:
+                                print 'Exception: Unable to insert OEMS_TICKETS_MAIN'
+
+                        # 新增影響範圍
+                        if sid == 0:
+                            oraqrysql = "select sid from oems_tickets_main where type='3110' and subtype in (311001,311003) and status<=5104 and impact_list='%s' and account='COSSv2'" % (impact_str)
+                            rs = oracon_oems.execall(oraqrysql)
+                            if rs != None and len(rs) > 0:
+                                for a_row in rs:
+                                    sid = a_row[0]
+                                oraupdsql = "insert into oems_impact (sid,type,value,companyno,node,area) values ('%d','SUBSID','%s','%s','%s','%s')" % (sid, subsid, companyno, nodeno, district)
+                                print oraupdsql
+                                try:
+                                    oracon_oems.execone(oraupdsql)
+                                    oracon_oems.commit()
+                                    #pass
+                                except:
+                                    print 'Exception: Unable to insert OEMS_IMPACT'
+
+                        # update CTI010 via WorkSheetNo
+                        if worksheet_arr:
+                            worksheet_str = "','" . join(worksheet_arr)
+                        print worksheet_str
+                        if worksheet_str != None and len(worksheet_str) > 0 and sid != None and sid > 0:
+                            oraupdsql = "update cti010 set ext_oems_id='%d' where so='%d' and coss_id in ('%s') and coss_id is not null and (ext_oems_id is null or ext_oems_id = 0)" % (sid, int(companyno), worksheet_str)
+                            print oraupdsql
+                            try:
+                                oracon_cti.execone(oraupdsql)
+                                oracon_cti.commit()
+                                #pass
+                            except:
+                                print 'Exception: Unable to update CTI010'
+
+                    sys.stdout.flush()
+                sys.stdout.flush()
+            else:
+                break
+            sys.stdout.flush()
+        sys.stdout.flush()
+
+con.close()
+con_qry.close()
+
+# 針對修復完成, 且震江已結單, 更新狀態為結案
+oraqrysql = ''
+if so == 'KBRO':
+    oraqrysql = "select sid,impact_list from oems_tickets_main where account='COSSv2' and status=5104 and operator not in (13026,13028,13031,13030,13029,13027)"
+elif so == 'CG':
+    oraqrysql = "select sid,impact_list from oems_tickets_main where account='COSSv2' and status=5104 and operator in (13026)"
+elif so == 'TFM':
+    oraqrysql = "select sid,impact_list from oems_tickets_main where account='COSSv2' and status=5104 and operator in (13028,13031,13030,13029,13027)"
+if oraqrysql != None and len(oraqrysql) > 0:
+    rs = oracon_oems.execall(oraqrysql)
+    ticket_arr = {}
+    sid_arr = {}
+    ii = 0
+    if rs != None and len(rs) > 0:
+        for a_row in rs:
+            sid = a_row[0]
+            implst = a_row[1]
+            ticket_arr[ii] = implst
+            sid_arr[implst] = sid
+            ii = ii+1
+    jj = 0
+    while jj<ii:
+        try:
+            print ticket_arr[jj]
+            print node_arr[ticket_arr[jj]]
+        except:
+            oraupdsql = "update oems_tickets_main set status=5105 where sid='%d'" % (sid_arr[ticket_arr[jj]])
+            print oraupdsql
+            oracon_oems.execone(oraupdsql)
+
+            #follow bomb close auto_alert tickets
+            oraupdsql = "update oems_tickets_main set status='5123',close_date=sysdate where ticket_id='%d' and account='COSSv2'" % (sid_arr[ticket_arr[jj]])
+            print oraupdsql
+            oracon_oems.execone(oraupdsql)
+            oracon_oems.commit()
+        jj = jj+1
+
+if oracon_oems.db:
+    oracon_oems.se_close()
+if oracon_cti.db:
+    oracon_cti.se_close()
+
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s] %s END\n" % (tme, so)

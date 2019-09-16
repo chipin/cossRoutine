@@ -1,0 +1,301 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+import sys, time
+import threading
+from pysnmpclass import snmpclass
+from oraclass import ORA
+
+cmstatus_mib = '.1.3.6.1.2.1.10.127.1.3.3.1.9'
+#cmstatus_map = {-1:'Unknown', 1:'Other', 2:'Ranging', 3:'RangingAborted', 4:'RangingComplete', 5:'IPComplete', 6:'RegistrationComplete', 7:'AccessDenied'}
+cmstatus_map = {-1:'Unknown', 1:'Offline', 2:'Ranging', 3:'RangingAborted', 4:'RangingComplete', 5:'IPComplete', 6:'Online', 7:'AccessDenied'}
+
+def query_status(loop, cmidx, ip, comm):
+    global cmstatus_mib, status_arr
+    try:
+        mib = "%s.%d" % (cmstatus_mib, cmidx)
+        agt = snmpclass(version='v1',ptimeout=1,pretries=3)
+        rets = agt.snmpget([ip, '-c', comm, mib])
+        if rets is not None and rets[0][1]!='':
+            status_arr['STATUS-'+str(loop)] = int(rets[0][1])
+        else:
+            status_arr['STATUS-'+str(loop)] = -1
+    except Exception, msg:
+        print msg
+    status_arr['DONE-'+str(loop)] = 1
+    print str(loop) + ': ' + ip + ', ' + mib + ', ' + str(status_arr['STATUS-'+str(loop)])
+
+'''
+def SMS_CPU_alert(so, ne, ext, status):
+    global so_mapping
+    if status==1:
+        smsg = "[告警發生]-%s CMTS設備:%s,CPU使用率為%s%%異常!" % (so_mapping[so], ne, ext)
+    else:
+        smsg = "[解除]-%s CMTS設備:%s,CPU使用率已恢復正常!" % (so_mapping[so], ne)
+    if 1:
+        oraconnect = ORA('COSS@KBRO_NMSDB')
+        if not oraconnect.db:
+            return -1
+        SMSSQL = "select mobile from v_sms_grp where gid='142' and (so='%s' or so is null)" % (so)
+        sms_arr = oraconnect.execall(SMSSQL)
+        for sms in sms_arr:
+            sql = "insert into oss_sms(sys,sender,target,msg) values('NOC','CMTSMON','%s','%s')" % (sms[0], smsg)
+            oraconnect.execone(sql)
+        oraconnect.commit()
+        if status==1 or status==0:
+            ora_oems = ORA('OEMS@KBRO_NMSDB')
+            if not ora_oems.db:
+                return -1
+            so_name = {}
+            oraqrysql = "select name,id from oems_mapping where type='OPERATOR' and name is not null"
+            rs = ora_oems.execall(oraqrysql)
+            if rs != None and len(rs) > 0:
+                for a_row in rs:
+                    if a_row[0]=='220':
+                        so_name['026'] = a_row[1]
+                    so_name[a_row[0]] = a_row[1]
+            ostatus = 5120
+            oraqrysql = "select sid,status from oems_tickets_main where ((type in (3111) and subtype in (311106)) or ticket_id is not null) and status in (5120,5121) and impact_list='%s-CPU'" % (ne)
+            sid = -1
+            rs = ora_oems.execall(oraqrysql)
+            if rs is not None and len(rs) > 0:
+                for a_row in rs:
+                    sid = int(a_row[0])
+                    ostatus = a_row[1]
+            print sid
+            if sid<0:
+                oraupdsql = "begin insert into oems_tickets_main(status,type,subtype,reason,descr,create_date,operator,account,normal_flag,impact_list) values('5120',3111,311106,'CMTS CPU使用率異常','%s',sysdate,'%s','CMTSMON','A','%s-CPU') return to_char(sid) into :1 ; end;" % (smsg, so_name[so], ne)
+                oems_sid_ary = ora_oems.db.BindingArray(1,12,'SQLT_STR')
+                ora_oems.c.execute(oraupdsql, oems_sid_ary)
+                sid = int(oems_sid_ary[0])
+            oraupdsql = "insert into oems_tickets_log(sid,status_date,orig_status,status,descr,account) values(%d,sysdate,%d,%d,'%s','CMTSMON')" % (sid,ostatus,ostatus,smsg)
+            print oraupdsql
+            ora_oems.execone(oraupdsql)
+            ora_oems.commit()
+            ora_oems.se_close()
+        tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print "[%s]: %s" % (tme, smsg)
+        oraconnect.se_close()
+'''
+
+def to_DB(loop):
+    global ora, oraoems, status_arr
+    status_arr['DONE-'+str(loop)] = 2
+
+    updsql = "update cmmac set synctime=sysdate,status='%d' where companyno='%s' and subsid='%d'" % (status_arr['STATUS-'+str(loop)], status_arr['SO-'+str(loop)], status_arr['SUBSID-'+str(loop)])
+    print str(loop) + ': ' + updsql
+    try:
+        ora.execone(updsql)
+        #pass
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print 'Exception: ['+nowdate+']'+str(msg)
+
+    status_str = 'Unknown'
+    if status_arr['STATUS-'+str(loop)] >= -1 and status_arr['STATUS-'+str(loop)] <= 7:
+        status_str = cmstatus_map[status_arr['STATUS-'+str(loop)]]
+    descr = "SO:%s, SubsID:%d, MAC:%s, NODE:%s, LINK:%s, ADDR:%s, Status:%s" % (status_arr['SO-'+str(loop)], status_arr['SUBSID-'+str(loop)], status_arr['MAC-'+str(loop)], status_arr['NODE-'+str(loop)], status_arr['LINK-'+str(loop)], status_arr['ADDR-'+str(loop)], status_str)
+    print descr
+
+    #if status_arr['OEMSID-'+str(loop)] == 237258:
+    #    status_arr['STATUS-'+str(loop)] = 6
+
+    if status_arr['OEMSID-'+str(loop)] is not None: # 已有告警
+        if status_arr['STATUS-'+str(loop)] == 6: # 恢復正常
+            updsql = "insert into oems_tickets_log (sid,status_date,descr,account) values ('%d',sysdate,'CM Status: Online 已恢復正常','CMMON')" % (status_arr['OEMSID-'+str(loop)])
+            print updsql
+            oraoems.execone(updsql)
+
+            updsql = "update cmmac_outdoor set errortime=NULL,oems_id=NULL where companyno='%s' and subsid='%d'" % (status_arr['SO-'+str(loop)], status_arr['SUBSID-'+str(loop)])
+            print updsql
+            ora.execone(updsql)
+        else: # 持續異常
+            pass
+    else: # 尚未有告警
+        if status_arr['STATUS-'+str(loop)] != 6: # 初次異常
+            sid = 0
+            updsql = "begin insert into oems_tickets_main (status,type,subtype,reason,descr,create_date,operator,account,normal_flag,impact_list) values ('5120',3111,311106,'OutdoorCM異常','%s',sysdate,'%s','CMMON','A','%d') return to_char(sid) into :1 ; end;" % (descr, status_arr['OEMSNO-'+str(loop)], status_arr['SUBSID-'+str(loop)])
+            print updsql
+            oems_sid_ary = oraoems.db.BindingArray(1,12,'SQLT_STR')
+            oraoems.c.execute(updsql, oems_sid_ary)
+            sid = int(oems_sid_ary[0])
+
+            updsql = "insert into oems_tickets_log (sid,status_date,orig_status,status,descr,account) values ('%d',sysdate,'5120','5120','%s','CMMON')" % (sid, descr)
+            print updsql
+            oraoems.execone(updsql)
+
+            updsql = "insert into oems_impact (sid,type,value,companyno,node,area) values ('%d','SUBSID','%d','%s','%s','%s')" % (sid, status_arr['SUBSID-'+str(loop)], status_arr['SO-'+str(loop)], status_arr['NODE-'+str(loop)], status_arr['AREA-'+str(loop)])
+            print updsql
+            oraoems.execone(updsql)
+
+            updsql = "update cmmac_outdoor set errortime=sysdate,oems_id='%d' where companyno='%s' and subsid='%d'" % (sid, status_arr['SO-'+str(loop)], status_arr['SUBSID-'+str(loop)])
+            print updsql
+            ora.execone(updsql)
+        else: # 一切正常
+            pass
+
+    ora.commit()
+    oraoems.commit()
+
+'''
+    if status_arr['STATUS-'+str(loop)] is not None and status_arr['STATUS-'+str(loop)] != 6: # OEMS
+        errstr = 'Offline'
+        if status_arr['STATUS-'+str(loop)] == -1:
+            errstr = 'Unknown'
+        descr = "SO:%s, SubsID:%s, MAC:%s, CMTS:%s, IDX:%d, NODE:%s, CM Status = %s" % (status_arr['SO-'+str(loop)],status_arr['SUBSID-'+str(loop)],status_arr['MAC-'+str(loop)],status_arr['CMTS-'+str(loop)],status_arr['IDX-'+str(loop)],status_arr['NODE-'+str(loop)],errstr)
+        print str(loop) + ': ' + descr
+        SQL = "begin OEMS.PROC_CREATE_ALERT_TICKET_NORET('%s','OutdoorCM','OutdoorCM Offline','%s','%s','','','','%s'); end;" % (status_arr['SO-'+str(loop)],descr,status_arr['SUBSID-'+str(loop)],status_arr['SUBSID-'+str(loop)])
+        print str(loop) + ': ' + SQL
+        try:
+            #oraoems.execone(SQL)
+            pass
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print 'Exception: ['+nowdate+']'+str(msg)
+
+    #ora.commit()
+    #oraoems.commit()
+'''
+
+
+ora = ORA('nms@cnis')
+if not ora.db:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+']: Unable to connect to server [CNIS]'
+    sys.exit(0)
+
+oraoems = ORA('oems@kbro_nmsdb')
+if not oraoems.db:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+']: Unable to connect to server [OEMS]'
+    sys.exit(0)
+
+while 1:
+    status_arr = {}
+    thread_arr = {}
+    loop = 0
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate
+
+    SQL = "select * from ( \
+             select a.companyno,a.subsid,b.cmmac,b.node,b.link,(b.city||b.district||b.addrname) instaddr,(b.city||'-'||b.district) instarea,b.cmts_id,b.idx,b.synctime,c.ip cmts_ip,c.snmp_ro,a.oems_id,d.oemsno from cmmac_outdoor a \
+             inner join cmmac b on b.companyno=a.companyno and b.subsid=a.subsid \
+             inner join cmts c on c.companyno=a.companyno and c.cmts_id=b.cmts_id \
+             inner join so d on d.companyno=a.companyno \
+             where a.owner='TWM' and a.stopyn='N' and b.cmts_id is not null and b.idx is not null and c.ip is not null and c.snmp_ro is not null \
+             and (a.updatetime > sysdate-1 or a.updatetime is null) and (b.synctime < sysdate-(5/(24*60)) or b.synctime is null) \
+             order by b.synctime asc \
+           ) where rownum <= 50"
+    #print SQL
+    rs1 = ora.execall(SQL)
+    reclen = len(rs1)
+    if rs1 is not None and reclen>0:
+        for aw in rs1:
+            so = aw[0]
+            subsid = aw[1]
+            cmmac = aw[2]
+            node = aw[3]
+            link = aw[4]
+            instaddr = aw[5]
+            instarea = aw[6]
+            cmts_id = aw[7]
+            cm_idx = aw[8]
+            cmts_ip = aw[10]
+            snmp_ro = aw[11]
+            oems_id = aw[12]
+            oems_no = aw[13]
+
+            status_arr['SO-'+str(loop)] = so
+            status_arr['SUBSID-'+str(loop)] = subsid
+            status_arr['MAC-'+str(loop)] = cmmac
+            status_arr['IDX-'+str(loop)] = cm_idx
+            status_arr['NODE-'+str(loop)] = node
+            status_arr['LINK-'+str(loop)] = link
+            status_arr['ADDR-'+str(loop)] = instaddr
+            status_arr['AREA-'+str(loop)] = instarea
+            status_arr['CMTS-'+str(loop)] = cmts_id
+            status_arr['IP-'+str(loop)] = cmts_ip
+            status_arr['OEMSID-'+str(loop)] = oems_id
+            status_arr['OEMSNO-'+str(loop)] = oems_no
+            status_arr['STATUS-'+str(loop)] = -1
+            status_arr['DONE-'+str(loop)] = -1
+            thread_arr[loop] = threading.Thread(target = query_status, args = (loop, cm_idx, cmts_ip, snmp_ro))
+            thread_arr[loop].start()
+            loop = loop+1
+        if loop > 0:
+            status_arr['NECNT'] = loop
+        sys.stdout.flush()
+    else:
+        break
+    time.sleep(10)
+
+
+    complete_cnt = 0
+    old_complete_cnt = 0
+    check_count = 0
+    while complete_cnt < status_arr['NECNT']:
+        i = 0
+        while i<status_arr['NECNT']:
+            if status_arr['DONE-'+str(i)]==1:
+                to_DB(i)
+                complete_cnt = complete_cnt+1
+                sys.stdout.flush()
+            i = i+1
+        if complete_cnt != old_complete_cnt:
+            check_count = 0
+            old_complete_cnt = complete_cnt
+        else:
+            check_count = check_count+1
+            if check_count>10:
+                print 'Error: Timeout (COMPLETE: %.5d)' % (complete_cnt)
+                break
+        sys.stdout.flush()
+        time.sleep(5)
+
+
+    sys.stdout.flush()
+
+    #break
+
+'''
+    i = 0
+    while i<loop:
+        SQL = ''
+        #if status_arr['STATUS-'+str(i)] is not None and status_arr['STATUS-'+str(i)]>0:
+        if status_arr['STATUS-'+str(i)] is not None:
+            SQL = "update em_cmmac set synctime=sysdate,status='%d' where so='%s' and cmmac='%s'" % (status_arr['STATUS-'+str(i)], status_arr['SO-'+str(i)], status_arr['MAC-'+str(i)])
+        #elif status_arr['STATUS-'+str(i)] is not None and status_arr['STATUS-'+str(i)]<0:
+        #    SQL = "update em_cmmac set status=-1,synctime=sysdate where so='%s' and cmmac='%s'" % (status_arr['SO-'+str(i)], status_arr['MAC-'+str(i)])
+        if SQL != '':
+            print str(i) + ': ' + SQL
+            try:
+                ora.execone(SQL)
+            except Exception, msg:
+                nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                print '['+nowdate+']:'+str(msg)
+
+        if status_arr['STATUS-'+str(i)] is not None and status_arr['STATUS-'+str(i)] != 6: # OEMS
+            errstr = 'Offline'
+            if status_arr['STATUS-'+str(i)] == -1:
+                errstr = 'Unknown'
+            descr = "SO:%s, SubsID:%s, MAC:%s, CMTS:%s, IDX:%d, NODE:%s, CM Status = %s" % (status_arr['SO-'+str(i)],status_arr['SUBSID-'+str(i)],status_arr['MAC-'+str(i)],status_arr['CMTS-'+str(i)],status_arr['IDX-'+str(i)],status_arr['NODE-'+str(i)],errstr)
+            print str(i) + ': ' + descr
+            SQL = "begin OEMS.PROC_CREATE_ALERT_TICKET_NORET('%s','OutdoorCM','OutdoorCM Offline','%s','%s','','','','%s'); end;" % (status_arr['SO-'+str(i)],descr,status_arr['SUBSID-'+str(i)],status_arr['SUBSID-'+str(i)])
+            #print str(i) + ': ' + SQL
+            try:
+                oraoems.execone(SQL)
+            except Exception, msg:
+                nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                print '['+nowdate+']:'+str(msg)
+
+        status_arr['STATUS-'+str(i)] = None
+        i = i+1
+    ora.commit()
+    oraoems.commit()
+    time.sleep(5)
+'''
+
+if ora is not None:
+    ora.se_close()
+if oraoems is not None:
+    oraoems.se_close()
+sys.exit(0)

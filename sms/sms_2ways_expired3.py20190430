@@ -1,0 +1,168 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+# CMMAC: xxxSTB   CPEMAC: xxxSTBdefault
+# CMMAC: xxxTV10M CPEMAC: xxxTVSTB
+# CMMAC: xxxCPzz  CPEMAC: xxxMTA-yy
+import time,sys,os,re
+import cossdb,pymssql
+from oraclass import ORA
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+def get_sms_code():
+    sel_ora = ORA('coss@cnis')
+    SQL = "SELECT RTNMSG,CALLREQUEST_REFUSE,WORKCAUSE_REFUSE FROM oss_sms_2ways WHERE STOPYN='N'"
+    rst = sel_ora.execall(SQL)
+    sel_ora.se_close()
+    rtnmsgArrs = []
+    rtnmsgObjs = {}
+    for item in rst:
+        rtnMsg = str(item[0])
+        rtnmsgArrs.append(rtnMsg)
+        rtnmsgObjs[rtnMsg] = [item[1],item[2]]
+    return [rtnmsgArrs,rtnmsgObjs]
+
+def upt_db(dbName):
+    # db 連接
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    oracon = None
+    oracon = ORA(dbName)
+    try:
+        if  oracon.db is None:
+            print "[contents=DB Connect Faile-%s]"%(dbName)
+            sys.stdout.flush()
+        else:
+            # 搜尋雙向簡訊，條件ex 今天9日14:00 -> 2日1400~6日1400
+            SQL = "SELECT SO,SUBSID,SEND_TYPE,RTN_MSG FROM oss_sms WHERE SEND_TYPE LIKE '%ST10%' AND status='OK' AND STATUS_DATE <= sysdate-3 AND STATUS_DATE >= sysdate-7"
+            rst = oracon.execall(SQL)
+            expired_data = {}
+            i=0
+            # 取得雙向簡訊代碼：RTNMSG,CALLREQUEST_REFUSE,WORKCAUSE_REFUSE
+            # getSmsCode[0] => ['81001','81002'...] 及 getSmsCode[1] => {'81001':['100 申告','996 雙向簡訊-失敗']}
+            getSmsCode = get_sms_code()
+            # 更新 mssql 鎮江，並 INSERT 申告(mssql MS0310)
+            # 將雙向簡訊oss_sms內，未回傳or回傳值不符合資料，更新為逾期 ex.oss_sms.RTN_MSG為81001AAA，不符合 oss_sms_2ways.RTNMSG代碼81001
+            for aw in rst:
+                if  aw[2].find('ST10-')>=0:
+                    # 自訂雙向簡訊代碼(SEND_TYPE=ST10-81001)
+                    if  aw[3] in getSmsCode[0]:
+                        # 若符合，則前端接收三竹及台哥大回傳簡訊時，即處理完畢 /ap/www/GW/sms/rtn_sms_twm.php,/ap/www/GW/sms/rtn_sms_mitake.php
+                        continue
+                    else:
+                        # 不符合，取出雙向簡訊代碼，oss_sms.SEND_TYPE=ST10-81001 => 81001，去對應 oss_sms_2ways.CALLREQUEST_REFUSE,oss_sms_2ways.WORKCAUSE_REFUSE
+                        rtnMsg = re.sub('ST10-','',aw[2])
+                        if  rtnMsg in getSmsCode[0]:
+                            callRequest,workCause = getSmsCode[1][rtnMsg][0],getSmsCode[1][rtnMsg][1]
+                        else:
+                            callRequest,workCause = '099 DTV拆機轉保留機上盒','010 DTV客戶不同意出帳'
+                else:
+                    # 一般雙向簡訊
+                    if  aw[3]=='':
+                        callRequest,workCause = '099 DTV拆機轉保留機上盒','010 DTV客戶不同意出帳'
+                    else:
+                        continue
+                # 將同so的subsid，組成同一個group(提昇寫入效能)
+                i = i+1
+                so = aw[0]
+                data = [str(aw[1]),callRequest,workCause]
+                try:
+                    expired_data[so].append(data)
+                except Exception:
+                    expired_data[so] = []
+                    expired_data[so].append(data)
+            print '\n########################################################'
+            print '# %s [dbName=%s][total=%s]'%(nowdate,dbName,i)
+            for so in expired_data:
+                upt_msDB(oracon,so,expired_data[so])
+
+            # 更新oracle 欄位 rtn_msg 為 2ways => expired
+            upd_sql = "UPDATE oss_sms SET rtn_msg='expired' WHERE rtn_msg='2ways' AND status='OK' AND STATUS_DATE <= sysdate-3"
+            oracon.execone(upd_sql) # 執行不回傳，用execone
+            oracon.commit()
+            print "[update oss_sms-OK(%s)]%s\n"%(dbName,upd_sql)
+    except Exception,msg:
+        print '[%s][contents=UPDATE DB ERROR]%s'%(nowdate,msg)
+        sys.stdout.flush()
+    oracon.se_close()
+    
+# mssql 鎮江
+def upt_msDB(oracon,so,dataArrays):
+    try:
+        if so=='106':
+            name = 'cg'
+            con = pymssql.connect(host='CossMS_CG',user=cossdb.account,password=cossdb.passwd,database='cossdb_cg')
+        elif so in ['101','103','104','300','701']:
+            name = 'tfm'
+            con = pymssql.connect(host='TFMCossMS_HUGE',user=cossdb.account,password=cossdb.passwd,database='cossdb')
+        else:
+            name = 'kbro'
+            con = pymssql.connect(host='kbroCossMS_HUGE',user=cossdb.account,password=cossdb.passwd,database='cossdb')
+        cur = con.cursor()
+        for data in dataArrays:
+            # data => [subsid,callRequest,workCause]
+            print "name=%s,so=%s,subsid=%s"%(name,so,data[0])
+            # update MS0200
+            querysql = "UPDATE ms0200 SET OldCNO='DTV試看戶' WHERE subsid='%s'"%(data[0])
+            cur.execute(querysql)
+            con.commit()
+            print "update MS0200-OK[subsid=%s]"%(data[0])
+            # insert 申告 MS0310
+            wkID = get_wkID(oracon,so)
+            ins_msDB(con,cur,so,data,wkID)
+        cur.close()
+    except Exception, errmesg:
+        print 'Error:',errmesg
+        sys.exit(0) 
+
+# oracle 撈取流水號
+def get_wkID(oracon,so):
+    SQL = "select coss.func_get_coss_wkid('A','%s') wkid from dual"%(so)
+    rst = oracon.execall(SQL)
+    return rst[0][0]
+
+# mssql 申告MS0310
+def ins_msDB(con,cur,so,data,wkID):
+    ins_sql = " \
+        insert into MS0310 (CompanyNo,InOutBound,WorkSheet,servicename,CallRequest,WorkCause,custid,custname,subsid,subsname,telenum01,bookdate,WorkTeam,WorkKind,SpendTime ,CaseClose,CreateTime,CreateName,MSComment ) \
+        select \
+            a.CompanyNo \
+            ,InOutBound='I' \
+            ,WorkSheet='%s' \
+            ,a.servicename \
+            ,CallRequest='%s'  \
+            ,WorkCause='%s' \
+            ,a.custid \
+            ,a.subsname as custname \
+            ,a.subsid \
+            ,a.subsname \
+            ,a.telenum01 \
+            ,bookdate=convert(char(10),getdate(),111)+' 00:00' \
+            ,b.InstName as WorkTeam \
+            ,WorkKind='L 二階申告' \
+            ,SpendTime=1 \
+            ,CaseClose='N' \
+            ,CreateTime=getdate() \
+            ,CreateName='簡訊通知'  \
+            ,MSComment='expired' \
+          from ms0200 a with(nolock) \
+          join ms0100 b with(nolock) \
+            on a.companyno = b.companyno \
+           and a.custid = b.custid \
+         where a.companyno = '%s' \
+           and a.SubsID='%s' \
+    "%(wkID,data[1],data[2],so,data[0])
+    print "insert MS0310-OK[so=%s,subsid=%s,wkID=%s]"%(so,data,wkID)
+    cur.execute(ins_sql)
+    con.commit()
+
+##############################################
+# 主程式開始
+##############################################
+print '\n# 主程式開始'
+print '# kbro'
+upt_db('coss@kbro_nmsdb') # 凱擘
+upt_db('coss@cnis')       # 台媒
+sys.exit(0)

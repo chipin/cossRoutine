@@ -1,0 +1,379 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+import sys,datetime,time
+import pymssql
+from oraclass import ORA
+
+if len(sys.argv) > 3 or len(sys.argv) < 2:
+    print 'Error: Argument error'
+    sys.exit(0)
+
+so = mode = ''
+so = sys.argv[1]
+
+if len(sys.argv) == 3:
+    if len(sys.argv[2]) > 0:
+        mode = sys.argv[2].lower()
+        if mode != 'full':
+            mode = ''
+
+someday = time.localtime(time.time()-3*24*60*60)
+datestr = "%s-%02d-%02d 00:00:00" % (someday[0],someday[1],someday[2])
+someday = time.localtime(time.time())
+today   = "%s%02d%02d" % (someday[0],someday[1],someday[2])
+
+
+try:
+    if so=='106':
+        con = pymssql.connect(dsn='cnis_web@CossMS_CG_CP950')
+    elif so in ['101','103','104','300','701']:
+        con = pymssql.connect(dsn='cnis_web@TFMCossMS_CP950_HUGE')
+        #con = pymssql.connect(dsn='cnis_web@TFMCossMS_CP950')
+    else:
+        con = pymssql.connect(dsn='cnis_web@kbroCossMS_CP950_HUGE')
+        #con = pymssql.connect(dsn='cnis_web@kbroCossMS_CP950')
+    cur = con.cursor()
+except Exception, errmesg:
+    print 'Error:',errmesg
+    sys.exit(0)
+
+oracon_upd = ORA('nms@cnis')
+if not oracon_upd.db:
+    sys.exit(0)
+
+querysql = "select a.companyno,a.nodeno,sum(case when b.servicename='1 CATV' then 1 else 0 end) catv_cnt, \
+            sum(case when b.servicename in ('2 CM','9 CMC') then 1 else 0 end) cm_cnt,max(c.mscity) a1,max(c.msdistrict) a2,max(c.addrname) a3,max(c.MSCOMMENT) a4, \
+            sum(case when b.servicename in ('3 DSTB') then 1 else 0 end) dtv_cnt,sum(case when b.servicename in ('5 FTTB') then 1 else 0 end) fttb_cnt,sum(case when b.servicename in ('7 EOC') then 1 else 0 end) eoc_cnt,sum(case when b.servicename in ('8 LL') then 1 else 0 end) ll_cnt \
+            from ms0102 a with (nolock) \
+            inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') \
+            inner join ms0030 c with (nolock) on c.companyno=a.companyno and c.hpunicode=a.hpunicode \
+            where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0 group by a.companyno,a.nodeno" % (so)
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s]" % (tme)
+print querysql
+cur.execute(querysql)
+node_arr = {}
+i = 0
+while 1:
+    curarr = cur.fetchmany(100)
+    i = i+1
+    if curarr:
+        xlen = len(curarr)
+        for ii in range(0, xlen):
+            companyno = curarr[ii][0]
+            nodeno = curarr[ii][1]
+            catv_cnt = curarr[ii][2]
+            cm_cnt = curarr[ii][3]
+            r1 = curarr[ii][4]
+            r2 = curarr[ii][5]
+            r3 = curarr[ii][6]
+            r4 = curarr[ii][7]
+            dtv_cnt = curarr[ii][8]
+            fttb_cnt = curarr[ii][9]
+            eoc_cnt = curarr[ii][10]
+            ll_cnt = curarr[ii][11]
+            if r4!='':
+                address = r1+r2+r3+'('+r4+')'
+            else:
+                address = r1+r2+r3
+            print companyno,nodeno,address
+            oraupdsql = "begin proc_cnis_upd_node_info('%s','%s','%d','%d','%s','%d','%d','%d','%d'); end;" % (companyno,nodeno,catv_cnt,cm_cnt,address,dtv_cnt,fttb_cnt,eoc_cnt,ll_cnt)
+            print oraupdsql
+            try:
+                oracon_upd.execone(oraupdsql)
+                oracon_upd.commit()
+            except Exception, detail:
+                print '%s,%s -> %s' % (companyno, nodeno, detail)
+    else:
+        break
+
+
+if mode == 'full':
+    querysql = "select b.companyno,b.subsid,b.singlesn cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem \
+                from ms0102 a with (nolock) \
+                inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('9 CMC') and b.singlesn is not null and b.singlesn <> '' \
+                where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0" % (so)
+else:
+    querysql = "select b.companyno,b.subsid,b.singlesn cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem \
+                from ms0102 a with (nolock) \
+                inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('9 CMC') and b.singlesn is not null and b.singlesn <> '' \
+                inner join ms0030 c with (nolock) on c.companyno=a.companyno and c.hpunicode=a.hpunicode \
+                left join ms0211 d with (nolock) on d.companyno=b.companyno and d.subsid=b.subsid and d.singlesn is not null and d.singlesn <> '' and d.stopyn <> 'Y' \
+                left join ms0040 e with (nolock) on e.companyno=d.companyno and e.chargename=d.chargename and e.servicename='9 CMC' and e.chargekind = '50' and e.stopyn <> 'Y' \
+                where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0 and \
+                (b.createtime >= '%s' or b.updatetime >= '%s' or b.tiestart >= '%s' or b.instdate >= '%s' or b.stopdate >= '%s' or b.recoverdate >= '%s' or b.movedate >= '%s' or b.haltdate >= '%s' or b.discntdate >= '%s' or b.connectdate >= '%s' or \
+                a.createtime >= '%s' or a.updatetime >= '%s' or c.createtime >= '%s' or c.updatetime >= '%s' or d.createtime >= '%s' or d.updatetime >= '%s' or d.instdate >= '%s')" % (so,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr)
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s]" % (tme)
+print querysql
+cur.execute(querysql)
+node_arr = {}
+i = 0
+while 1:
+    curarr = cur.fetchmany(100)
+    i = i+1
+    if curarr:
+        xlen = len(curarr)
+        for ii in range(0, xlen):
+            companyno = curarr[ii][0]
+            subsid = int(curarr[ii][1])
+            cmmac = curarr[ii][2]
+            custstatus = curarr[ii][3]
+            addrname = curarr[ii][4][:79]
+            nodeno = curarr[ii][5]
+            link = curarr[ii][6]
+            billpkg = curarr[ii][7]
+            billitem = curarr[ii][8]
+            if cmmac is not None:
+                oraupdsql = "update cmmac set subsid='' where companyno='%s' and cmmac<>'%s' and subsid=%d" % (companyno, cmmac, subsid)
+                print oraupdsql
+                try:
+                    oracon_upd.execone(oraupdsql)
+                except Exception, detail:
+                    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                oraupdsql = "update cmmac set subsid='%d',custstatus='%s',addrname='%s',servicename='9 CMC',node='%s',link='%s',billpkg='%s',billitem='%s' where cmmac='%s'" % (subsid, custstatus, addrname, nodeno, link, billpkg, billitem, cmmac)
+                print oraupdsql
+                try:
+                    oracon_upd.execone(oraupdsql)
+                except Exception, detail:
+                    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                oracon_upd.commit()
+
+                #oraupdsql = "begin coss.proc_repair_cm_status('%s',%d,'%s','%s'); end;" % (companyno, subsid, cmmac, billitem)
+                #print oraupdsql
+                #try:
+                #    oracon_upd.execone(oraupdsql)
+                #except Exception, detail:
+                #    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                #oracon_upd.commit()
+    else:
+        break
+
+
+if mode == 'full':
+    querysql = "select b.companyno,b.subsid,b.singlesn cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem,z.actdate,z.oldpackage,z.oldcharge,z.newpackage,z.newcharge \
+                from ms0102 a with (nolock) \
+                inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('2 CM') and b.singlesn is not null and b.singlesn <> '' \
+                left join ( \
+                  select x.companyno,x.subsid,x.msflag,convert(varchar(8),x.startdate,112) startdate,case when x.actdate is not null and x.actdate <> '' then convert(varchar(8),x.actdate,112) else convert(varchar(8),x.startdate,112) end actdate,x.oldpackage,x.oldcharge,x.newpackage,x.newcharge \
+                  from ms0216 x with (nolock) \
+                  inner join ( \
+                    select m.companyno,m.subsid,max(m.recvno) recvno from ms0216 m with (nolock) \
+                    inner join ms0200 n with (nolock) on n.companyno=m.companyno and n.subsid=m.subsid and substring(n.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and n.servicename in ('2 CM') and n.singlesn is not null and n.singlesn <> '' \
+                    where m.companyno='%s' group by m.companyno,m.subsid \
+                  ) y on y.companyno=x.companyno and y.subsid=x.subsid and y.recvno=X.recvno \
+                  where x.msflag='1 正常' \
+                ) z on z.companyno=b.companyno and z.subsid=b.subsid \
+                where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0" % (so,so)
+else:
+    querysql = "select b.companyno,b.subsid,b.singlesn cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem,z.actdate,z.oldpackage,z.oldcharge,z.newpackage,z.newcharge \
+                from ms0102 a with (nolock) \
+                inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('2 CM') and b.singlesn is not null and b.singlesn <> '' \
+                inner join ms0030 c with (nolock) on c.companyno=a.companyno and c.hpunicode=a.hpunicode \
+                left join ms0211 d with (nolock) on d.companyno=b.companyno and d.subsid=b.subsid and d.singlesn is not null and d.singlesn <> '' and d.stopyn <> 'Y' \
+                left join ms0040 e with (nolock) on e.companyno=d.companyno and e.chargename=d.chargename and e.servicename='2 CM' and e.chargekind = '50' and e.stopyn <> 'Y' \
+                left join ( \
+                  select x.companyno,x.subsid,x.msflag,convert(varchar(8),x.startdate,112) startdate,case when x.actdate is not null and x.actdate <> '' then convert(varchar(8),x.actdate,112) else convert(varchar(8),x.startdate,112) end actdate,x.oldpackage,x.oldcharge,x.newpackage,x.newcharge \
+                  from ms0216 x with (nolock) \
+                  inner join ( \
+                    select m.companyno,m.subsid,max(m.recvno) recvno from ms0216 m with (nolock) \
+                    inner join ms0200 n with (nolock) on n.companyno=m.companyno and n.subsid=m.subsid and substring(n.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and n.servicename in ('2 CM') and n.singlesn is not null and n.singlesn <> '' \
+                    where m.companyno='%s' group by m.companyno,m.subsid \
+                  ) y on y.companyno=x.companyno and y.subsid=x.subsid and y.recvno=X.recvno \
+                  where x.msflag='1 正常' \
+                ) z on z.companyno=b.companyno and z.subsid=b.subsid \
+                where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0 and \
+                (b.createtime >= '%s' or b.updatetime >= '%s' or b.tiestart >= '%s' or b.instdate >= '%s' or b.stopdate >= '%s' or b.recoverdate >= '%s' or b.movedate >= '%s' or b.haltdate >= '%s' or b.discntdate >= '%s' or b.connectdate >= '%s' or \
+                a.createtime >= '%s' or a.updatetime >= '%s' or c.createtime >= '%s' or c.updatetime >= '%s' or d.createtime >= '%s' or d.updatetime >= '%s' or d.instdate >= '%s')" % (so,so,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr)
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s]" % (tme)
+print querysql
+cur.execute(querysql)
+node_arr = {}
+i = 0
+while 1:
+    curarr = cur.fetchmany(100)
+    i = i+1
+    if curarr:
+        xlen = len(curarr)
+        for ii in range(0, xlen):
+            companyno = curarr[ii][0]
+            subsid = int(curarr[ii][1])
+            cmmac = curarr[ii][2]
+            custstatus = curarr[ii][3]
+            addrname = curarr[ii][4][:79]
+            nodeno = curarr[ii][5]
+            link = curarr[ii][6]
+            billpkg = curarr[ii][7]
+            billitem = curarr[ii][8]
+            actdate = curarr[ii][9]
+            oldpkg = curarr[ii][10]
+            oldbill = curarr[ii][11]
+            newpkg = curarr[ii][12]
+            newbill = curarr[ii][13]
+            if billitem is not None and oldbill is not None and newpkg is not None and newbill is not None:
+                if billpkg == oldpkg and billitem == oldbill: # 促案變更未過帳(現行方案=舊方案,現行收費=舊收費)
+                    if today >= actdate: # 已生效
+                        print 'new: ',oldpkg,oldbill,actdate,newpkg,newbill
+                        billpkg = newpkg
+                        billitem = newbill
+                elif billpkg == newpkg and billitem == newbill: # 促案變更已過帳(現行方案=新方案,現行收費=新收費)
+                    if actdate > today: # 未生效
+                        print 'old: ',oldpkg,oldbill,actdate,newpkg,newbill
+                        billpkg = oldpkg
+                        billitem = oldbill
+
+            if cmmac is not None:
+                oraupdsql = "update cmmac set subsid='' where companyno='%s' and cmmac<>'%s' and subsid=%d" % (companyno, cmmac, subsid)
+                print oraupdsql
+                try:
+                    oracon_upd.execone(oraupdsql)
+                except Exception, detail:
+                    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                oraupdsql = "update cmmac set subsid='%d',custstatus='%s',addrname='%s',servicename='2 CM',node='%s',link='%s',billpkg='%s',billitem='%s' where cmmac='%s'" % (subsid, custstatus, addrname, nodeno, link, billpkg, billitem, cmmac)
+                print oraupdsql
+                try:
+                    oracon_upd.execone(oraupdsql)
+                except Exception, detail:
+                    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                oracon_upd.commit()
+
+                #oraupdsql = "begin coss.proc_repair_cm_status('%s',%d,'%s','%s'); end;" % (companyno, subsid, cmmac, billitem)
+                #print oraupdsql
+                #try:
+                #    oracon_upd.execone(oraupdsql)
+                #except Exception, detail:
+                #    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                #oracon_upd.commit()
+    else:
+        break
+
+if so in ['101','103','104','300','701']:
+    if mode == 'full':
+        querysql = "select b.companyno,b.subsid,f.stb_cm_mac cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem \
+                    from ms0102 a with (nolock) \
+                    inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('3 DSTB') and b.singlesn is not null and b.singlesn <> '' \
+                    inner join v_ivrmi0130 f on f.companyno=b.companyno and f.singlesn=b.singlesn and f.stb_cm_mac is not null and f.stb_cm_mac <> '' \
+                    where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0" % (so)
+    else:
+        querysql = "select b.companyno,b.subsid,f.stb_cm_mac cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem \
+                    from ms0102 a with (nolock) \
+                    inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('3 DSTB') and b.singlesn is not null and b.singlesn <> '' \
+                    inner join ms0030 c with (nolock) on c.companyno=a.companyno and c.hpunicode=a.hpunicode \
+                    left join ms0211 d with (nolock) on d.companyno=b.companyno and d.subsid=b.subsid and d.singlesn is not null and d.singlesn <> '' and d.stopyn <> 'Y' \
+                    left join ms0040 e with (nolock) on e.companyno=d.companyno and e.chargename=d.chargename and e.servicename='3 DSTB' and e.chargekind = '50' and e.stopyn <> 'Y' \
+                    inner join v_ivrmi0130 f on f.companyno=b.companyno and f.singlesn=b.singlesn and f.stb_cm_mac is not null and f.stb_cm_mac <> '' \
+                    where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0 and \
+                    (b.createtime >= '%s' or b.updatetime >= '%s' or b.tiestart >= '%s' or b.instdate >= '%s' or b.stopdate >= '%s' or b.recoverdate >= '%s' or b.movedate >= '%s' or b.haltdate >= '%s' or b.discntdate >= '%s' or b.connectdate >= '%s' or \
+                    a.createtime >= '%s' or a.updatetime >= '%s' or c.createtime >= '%s' or c.updatetime >= '%s' or d.createtime >= '%s' or d.updatetime >= '%s' or d.instdate >= '%s')" % (so,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr)
+else:
+    if mode == 'full':
+        querysql = "select b.companyno,b.subsid,f.stbcmmac cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem \
+                    from ms0102 a with (nolock) \
+                    inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('3 DSTB') and b.singlesn is not null and b.singlesn <> '' \
+                    inner join mi0130 f with (nolock) on f.companyno=b.companyno and f.singlesn=b.singlesn and f.stbcmmac is not null and f.stbcmmac <> '' \
+                    where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0" % (so)
+    else:
+        querysql = "select b.companyno,b.subsid,f.stbcmmac cmmac,b.custstatus,a.mscity+a.msdistrict+a.addrname,a.nodeno,a.linkid,b.packagename,b.billitem \
+                    from ms0102 a with (nolock) \
+                    inner join ms0200 b with (nolock) on b.companyno=a.companyno and b.custid=a.custid and substring(b.custstatus,1,1) in ('0','1','2','6','7','8','9','A') and b.servicename in ('3 DSTB') and b.singlesn is not null and b.singlesn <> '' \
+                    inner join ms0030 c with (nolock) on c.companyno=a.companyno and c.hpunicode=a.hpunicode \
+                    left join ms0211 d with (nolock) on d.companyno=b.companyno and d.subsid=b.subsid and d.singlesn is not null and d.singlesn <> '' and d.stopyn <> 'Y' \
+                    left join ms0040 e with (nolock) on e.companyno=d.companyno and e.chargename=d.chargename and e.servicename='3 DSTB' and e.chargekind = '50' and e.stopyn <> 'Y' \
+                    inner join mi0130 f with (nolock) on f.companyno=b.companyno and f.singlesn=b.singlesn and f.stbcmmac is not null and f.stbcmmac <> '' \
+                    where a.companyno='%s' and a.nodeno is not null and a.nodeno <> '' and a.nodeno <> '未設' and a.addrno=0 and \
+                    (b.createtime >= '%s' or b.updatetime >= '%s' or b.tiestart >= '%s' or b.instdate >= '%s' or b.stopdate >= '%s' or b.recoverdate >= '%s' or b.movedate >= '%s' or b.haltdate >= '%s' or b.discntdate >= '%s' or b.connectdate >= '%s' or \
+                    a.createtime >= '%s' or a.updatetime >= '%s' or c.createtime >= '%s' or c.updatetime >= '%s' or d.createtime >= '%s' or d.updatetime >= '%s' or d.instdate >= '%s')" % (so,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr,datestr)
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s]" % (tme)
+print querysql
+cur.execute(querysql)
+node_arr = {}
+i = 0
+while 1:
+    curarr = cur.fetchmany(100)
+    i = i+1
+    if curarr:
+        xlen = len(curarr)
+        for ii in range(0, xlen):
+            companyno = curarr[ii][0]
+            subsid = int(curarr[ii][1])
+            cmmac = curarr[ii][2]
+            custstatus = curarr[ii][3]
+            addrname = curarr[ii][4][:79]
+            nodeno = curarr[ii][5]
+            link = curarr[ii][6]
+            billpkg = curarr[ii][7]
+            billitem = curarr[ii][8]
+            if cmmac is not None:
+                oraupdsql = "update cmmac set subsid='' where companyno='%s' and cmmac<>'%s' and subsid=%d" % (companyno, cmmac, subsid)
+                print oraupdsql
+                try:
+                    oracon_upd.execone(oraupdsql)
+                except Exception, detail:
+                    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                oraupdsql = "update cmmac set subsid='%d',custstatus='%s',addrname='%s',servicename='3 DSTB',node='%s',link='%s',billpkg='%s',billitem='%s' where cmmac='%s'" % (subsid, custstatus, addrname, nodeno, link, billpkg, billitem, cmmac)
+                print oraupdsql
+                try:
+                    oracon_upd.execone(oraupdsql)
+                except Exception, detail:
+                    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                oracon_upd.commit()
+
+                #oraupdsql = "begin coss.proc_repair_cm_status('%s',%d,'%s','%s'); end;" % (companyno, subsid, cmmac, billitem)
+                #print oraupdsql
+                #try:
+                #    oracon_upd.execone(oraupdsql)
+                #except Exception, detail:
+                #    print '%s,(%s,%d) -> %s' % (oraupdsql, companyno, subsid, detail)
+                #oracon_upd.commit()
+    else:
+        break
+
+#querysql = "select companyno,nodeno,netid,chname,rulecmip,instplace,mscity,msdistrict,msregion,locateaddr from ms0020 with (nolock) where companyno='%s' and rulecmip <>''" % (so)
+#tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+#print "[%s]" % (tme)
+#print querysql
+#cur.execute(querysql)
+#node_arr = {}
+#i = 0
+#while 1:
+#    curarr = cur.fetchmany(100)
+#    i = i+1
+#    if curarr:
+#        xlen = len(curarr)
+#        for ii in range(0, xlen):
+#            companyno = curarr[ii][0]
+#            nodeno = curarr[ii][1]
+#            netid = curarr[ii][2]
+#            chname = curarr[ii][3]
+#            cmmac = curarr[ii][4]
+#            instplace = curarr[ii][5]
+#            r1 = curarr[ii][6]
+#            r2 = curarr[ii][7]
+#            r3 = curarr[ii][8]
+#            if r3=='未設':
+#                r3 = ''
+#            r4 = curarr[ii][9]
+#            if r4!='':
+#                address = r1+r2+r3+r4
+#            else:
+#                address = r1+r2+r3
+#            print companyno,nodeno,address
+#            oraupdsql = "begin proc_upd_outdoor_cm('%s','%s','%s','%s','%s','%s','%s'); end;" % (companyno, cmmac, nodeno, netid, chname, instplace, address)
+#            print oraupdsql
+#            try:
+#                oracon_upd.execone(oraupdsql)
+#                oracon_upd.commit()
+#            except Exception, detail:
+#                print '%s,%s -> %s' % (companyno, cmmac, detail)
+#    else:
+#        break
+
+#oracon_upd.commit()
+
+if oracon_upd.db:
+    oracon_upd.se_close()
+
+con.close()
+sys.exit(0)

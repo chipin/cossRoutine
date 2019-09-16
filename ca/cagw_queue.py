@@ -1,0 +1,536 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+# 10.22.111.11 : 60002
+import os,sys,time,string,socket,select
+from oraclass import ORA
+from cagw_func import CAGW_FUNC
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+if len(sys.argv) != 2:
+    print 'usage:',sys.argv[0],'SourceID'
+    sys.exit(0)
+
+try:
+    sourceid = int(sys.argv[1])
+except:
+    sourceid = 0
+
+#if sourceid==5:
+#    sosql = " and so='999' and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==6:
+#    sosql = " and so in ('210') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==7:
+#    sosql = " and so in ('220','104','500') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==8:
+#    sosql = " and so in ('310','610') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==9:
+ #   sosql = " and so in ('820','250') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==10:
+#    sosql = " and so in ('420','300') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==11:
+ #   sosql = " and so in ('240','810') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==12:
+#    sosql = " and so in ('101','260') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==13:
+#    sosql = " and so in ('230','701') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==14:
+#    sosql = " and so in ('410','103','026') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==15:
+#    sosql = " and so in ('106','330') and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==18:
+#   sosql = " and src in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==19:
+#    sosql = " and so='998' and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#elif sourceid==20:
+#    sosql = " and so='997' and src not in ('IVR-PPV','EPG-PPV','BATCH')"
+#else:
+#print 'usage:',sys.argv[0],'SourceID'
+#    sys.exit(0)
+
+oracon = None
+oracon = ORA('coss@kbro_nmsdb')
+if oracon.db is None:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] ERROR: Unable to connect to DB [KBRO_NMSDB]'
+    sys.exit(0)
+
+init_seq = -1
+sql = "select seq from cagw_seq where sourceid='%d'" % (sourceid)
+rst = oracon.execall(sql)
+if rst is not None and len(rst) > 0:
+    for a_row in rst:
+        init_seq = a_row[0]
+oracon.se_close()
+
+if init_seq<0:
+    init_seq = 800000000
+
+print "init seq: %.9d" % (init_seq)
+
+querySql = "select sid,icc_no,stb_no,cmd,bg_date,end_date,channel,mail,tune,networkid,product_name,ppvdate from v_cagw_queue where rownum<=30 and sourceid is not null and sourceid='%d'" % (sourceid)
+
+xca_cmd = ''
+xca_ret = ''
+cafunc = CAGW_FUNC(sourceid, 'emm', init_seq)
+recv_buffer_length = 40960
+
+def gw_open(host, port=59001):
+    msg = "getaddrinfo returns an empty list"
+    for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        try:
+            sock = socket.socket(af, socktype, proto)
+            sock.connect(sa)
+        except socket.error, msg:
+            if sock:
+                sock.close()
+            sock = None
+            print "gw_open() error: %s" % (str(msg))
+            time.sleep(5)
+            continue
+        break
+    if not sock:
+        raise socket.error, msg
+    return sock
+
+def gw_read(tn):
+    buf = None
+    r, w, e = select.select([tn], [], [], 0.5)
+    if r == []:
+        #tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        #print "[%s]: Socket read timeout..." % (tme)
+        return None
+    try:
+        buf = tn.recv(recv_buffer_length)
+        #cafunc.prn_data(buf)
+    except Exception, msg:
+        print 'gw_read(): '+str(msg)
+        return 'ERROR'
+    return buf
+
+def gw_send(tn, s):
+    try:
+        buf = chr(0)+chr(len(s))+s
+        tn.send(buf)
+        #cafunc.prn_data(buf)
+    except Exception, msg:
+        print 'gw_send(): '+str(msg)
+        return -1
+    return 1
+
+def login(tn):
+    obname = "KBRO_CAGWD3"
+    buf = chr(0)+chr(len(obname)+2)+chr(0x0)+chr(0xb)+obname
+    tn.send(buf)
+    #cafunc.prn_data(buf)
+    rst = gw_read(tn)
+
+    loop = 0
+    while rst is None and loop<30:
+        time.sleep(1)
+        rst = gw_read(tn)
+        loop = loop+1
+    print rst
+    if rst is not None and rst[2]==chr(0x06):
+        rst = gw_read(tn)
+        print rst
+        loop = 0
+        while rst is None and loop<30:
+            time.sleep(1)
+            rst = gw_read(tn)
+            loop = loop+1
+        if rst is not None and rst[2]==chr(0x0):
+            return 1
+    elif rst=='ERROR':
+        return -1
+    return -1
+
+def ora_upd(ora, sid, status, result=None, ca_cmd=None, ca_ret=None):
+    try:
+        if result is not None:
+            result = string.replace(result, "'","*")
+        result_sql = ''
+        if result is not None:
+            result_sql = ",result='%s'" % (result)
+        cacmd_sql = ''
+        if ca_cmd is not None:
+            cacmd_sql = ",ca_cmd='%s'" % (ca_cmd)
+        caret_sql = ''
+        if ca_ret is not None:
+            caret_sql = ",ca_ret='%s'" % (ca_ret)
+        sql = "update cagw_queue_d3 set status='%s'%s%s%s,update_date=sysdate where sid=%d" % (status, result_sql, cacmd_sql, caret_sql, int(sid))
+        #print sql
+        ora.execone(sql)
+        return 1
+    except Exception, msg:
+        print msg
+        return -1
+
+def main():
+    global sourceid
+    oracon = None
+    sock = None
+    nop_flag = 0
+    try:
+        nowdate = time.strftime("%Y%m%d", time.localtime())
+        while 1:
+            try:
+                data_flag = 0
+                if nop_flag>0:
+                    nop_flag = 0
+                if sock is None:
+                    sock = gw_open("10.22.111.11",60002)
+                    if sock is None:
+                        print 'Socket create error'
+                        time.sleep(5)
+                        continue
+                    if login(sock)<=0:
+                        print 'Login to CA error'
+                        sock.close()
+                        sock = None
+                        time.sleep(5)
+                        continue
+                if oracon is None:
+                    oracon = ORA('coss@kbro_nmsdb')
+                rs = None
+                if oracon.cexist():
+                    try:
+                        rs = oracon.execall(querySql)
+                    except Exception, msg:
+                        print querySql
+                        print 'querySQL: '+str(msg)
+                        oracon.se_close()
+                        oracon = None
+                        time.sleep(2)
+                        continue
+
+                    if rs is not None and len(rs) > 0:
+                        print "%s cnt=%d" %(time.strftime("%Y/%m/%d %H:%M:%S", time.localtime()), len(rs))
+                        data_flag = 1
+                        for a_row in rs:
+                            try:
+                                sid = a_row[0]
+                                icc_no = a_row[1]
+                                stb_no = a_row[2]
+                                cmd = a_row[3]
+                                bg_date = a_row[4]
+                                end_date = a_row[5]
+                                mail = a_row[7]
+                                tune = a_row[8]
+                                networkid = a_row[9]
+                                prodname = a_row[10]
+                                ppvdate = a_row[11]
+                                if stb_no is None:
+                                    stb_no = '0000000000'
+                                channel = "%.12d" % int(a_row[6])
+
+                                if cmd=='A1':
+                                    resp = cafunc.gw_add_icc(sid, ppvdate, end_date, icc_no, stb_no)
+                                    if resp < 0:
+                                      pass
+                                    elif networkid is not None:
+                                      resp = cafunc.gw_add_zipcode(sid, bg_date, end_date, icc_no, networkid)
+                                elif cmd=='A1P':
+                                    resp = cafunc.gw_add_icc(sid, ppvdate, end_date, icc_no, stb_no, '1')
+                                    if resp < 0:
+                                      pass
+                                    elif networkid is not None:
+                                      resp = cafunc.gw_add_zipcode(sid, bg_date, end_date, icc_no, networkid)
+                                elif cmd=='A2':
+                                    resp = cafunc.gw_cancel_icc(sid, bg_date, end_date, icc_no)
+                                elif cmd=='A3':
+                                    resp = cafunc.gw_repack_icc(sid, ppvdate, end_date, icc_no, stb_no)
+                                elif cmd=='A4':
+                                    resp = cafunc.gw_cancel_icc_no_cancel(sid, bg_date, end_date, icc_no)
+                                elif cmd=='A5':
+                                    resp = cafunc.gw_add_zipcode(sid, bg_date, end_date, icc_no, networkid)
+                                elif cmd=='A6':
+                                    resp = cafunc.gw_stb_cross_region(sid, bg_date, end_date, icc_no, networkid)                                    
+                                elif cmd=='B1':
+                                    resp = cafunc.gw_add_prod(sid, bg_date, end_date, icc_no, channel)
+                                elif cmd=='B1P':
+                                    resp = cafunc.gw_add_prod(sid, bg_date, end_date, icc_no, channel, '1')
+                                elif cmd=='B2':
+                                    resp = cafunc.gw_cancel_prod(sid, bg_date, end_date, icc_no, channel)
+                                elif cmd=='B21':
+                                    resp = cafunc.gw_cancel_prod_1day(sid, bg_date, end_date, icc_no, channel)
+                                elif cmd=='B2A':
+                                    resp = cafunc.gw_cancel_all_prod(sid, bg_date, end_date, icc_no)
+                                elif cmd=='B7':
+                                    resp = cafunc.gw_add_prod_7days(sid, bg_date, end_date, icc_no, channel)
+                                elif cmd=='B8':
+                                    resp = cafunc.gw_add_prod_62days(sid, bg_date, end_date, icc_no, channel)
+                                elif cmd=='B20':
+                                    resp = cafunc.gw_add_prod_ndays(sid, bg_date, end_date, icc_no, channel, 20)
+                                elif cmd=='B20P':
+                                    resp = cafunc.gw_add_prod_ndays(sid, bg_date, end_date, icc_no, channel, 20, '1')
+                                elif cmd=='B0N':
+                                    resp = cafunc.gw_add_prod(sid, bg_date, end_date, icc_no, channel)
+                                elif cmd=='B0NP':
+                                    resp = cafunc.gw_add_prod(sid, bg_date, end_date, icc_no, channel, '1')
+                                elif cmd=='E1':
+                                    resp = cafunc.gw_chgpwd(sid, bg_date, end_date, icc_no)
+                                elif cmd=='E2':
+                                    resp = cafunc.gw_resetpwd(sid, bg_date, end_date, icc_no)
+                                elif cmd=='E3':
+                                    resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 0)
+                                elif cmd=='E3P':
+                                    resp = cafunc.gw_mail_by_profile(sid, bg_date, end_date, icc_no, mail, 0, '1')
+                                elif cmd=='E3E':
+                                    resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 0, 2)
+                                elif cmd=='E4':
+                                    resp = cafunc.gw_forcetune(sid, bg_date, end_date, icc_no, tune)
+                                elif cmd=='E4U':
+                                    resp = cafunc.gw_channel_change(sid, bg_date, end_date, icc_no, '3')
+                                elif cmd=='E4A':
+                                    resp = cafunc.gw_allchannel_change(sid, bg_date, end_date, icc_no, '3')      
+                                elif cmd=='E5':
+                                    resp = cafunc.gw_networkid(sid, bg_date, end_date, icc_no, networkid)
+                                elif cmd=='E6':
+                                    resp = cafunc.gw_resetpincode(sid, bg_date, end_date, icc_no)
+                                elif cmd=='E7':
+                                    resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 1)
+                                elif cmd=='E7P':
+                                    resp = cafunc.gw_mail_by_profile(sid, bg_date, end_date, icc_no, mail, 1, '1')
+                                elif cmd=='E7N':
+                                    resp = cafunc.gw_mail_by_nid(sid, bg_date, end_date, str(networkid), mail)
+                                elif cmd=='E7NP':
+                                    resp = cafunc.gw_mail_by_nid_by_profile(sid, bg_date, end_date, str(networkid), mail, '1')
+                                elif cmd=='E8':
+                                    resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 0)
+                                elif cmd=='E8P':
+                                    resp = cafunc.gw_mail_by_profile(sid, bg_date, end_date, icc_no, mail, 0, '1')
+                                elif cmd=='E9':
+                                    resp = cafunc.gw_boot_channel(sid, bg_date, end_date, icc_no, '40')
+                                elif cmd=='E10':
+                                    resp = cafunc.gw_boot_channel(sid, bg_date, end_date, icc_no, '80')
+                                elif cmd=='E11':
+                                    resp = cafunc.gw_forcetune_music(sid, bg_date, end_date, icc_no)
+                                elif cmd=='E12':
+                                    resp = cafunc.gw_boot_channel(sid, bg_date, end_date, icc_no, '20')
+                                elif cmd=='E13':
+                                    resp = cafunc.gw_boot_channel(sid, bg_date, end_date, icc_no, '10')
+                                elif cmd=='E14':
+                                    resp = cafunc.gw_setiad(sid, bg_date, end_date, icc_no, tune)  
+                                elif cmd=='P1':
+                                    resp = cafunc.gw_setcredit(sid, ppvdate, end_date, icc_no, channel)
+                                elif cmd=='P2':
+                                    resp = cafunc.gw_resetcredit(sid, bg_date, end_date, icc_no, channel)
+                                elif cmd=='P3':
+                                    resp = cafunc.gw_seteventprod(sid, bg_date, end_date, icc_no, channel, prodname, tune)
+                                elif cmd=='P4':
+                                    resp = cafunc.gw_suspend_ippv(sid, ppvdate, end_date, icc_no)
+                                elif cmd=='P5':
+                                    resp = cafunc.gw_immediate_callback(sid, ppvdate, end_date, icc_no)
+                                elif cmd=='P6':
+                                    resp = cafunc.gw_resume_ippv(sid, bg_date, end_date, icc_no)
+                                elif cmd=='P7':
+                                    resp = cafunc.gw_get_product(sid, bg_date, end_date, icc_no)
+                                elif cmd=='P8':
+                                    resp = cafunc.gw_upd_ippvthreshold(sid, bg_date, end_date, icc_no, tune)
+                                elif cmd=='P9':
+                                    resp = cafunc.gw_cmd_pincode(sid, bg_date, end_date, icc_no)
+                                elif cmd=='P10':
+                                    resp = cafunc.gw_cmd_setcallback_date(sid, ppvdate, end_date, icc_no)
+                                elif cmd=='V1':
+                                    resp = cafunc.gw_PVR_pair_hd(sid, bg_date, end_date, icc_no, prodname)
+                                elif cmd=='V2':
+                                    resp = cafunc.gw_PVR_pair_any(sid, bg_date, end_date, icc_no)
+                                elif cmd=='V3':
+                                    resp = cafunc.gw_PVR_hd_storage(sid, bg_date, end_date, icc_no, tune)
+                                elif cmd=='V4':
+                                    resp = cafunc.gw_PVR_factory_reset(sid, bg_date, end_date, icc_no)
+                                elif cmd=='V5':
+                                    resp = cafunc.gw_PVR_OTA_force(sid, bg_date, end_date, icc_no)
+                                elif cmd=='V6':
+                                    resp = cafunc.gw_PVR_OTA_interactive(sid, bg_date, end_date, icc_no)
+                                elif cmd=='V7':
+                                    resp = cafunc.gw_BAT_set(sid, bg_date, end_date, icc_no, networkid)
+                                elif cmd=='V9':
+                                    resp = cafunc.gw_reboot_interactive(sid, bg_date, end_date, icc_no,str(networkid))
+                                elif cmd=='V10':
+                                    resp = cafunc.gw_reboot_force(sid, bg_date, end_date, icc_no)
+                                else:
+                                    resp = -2
+                                if resp<0:
+                                    print '[Error]: %d, %s' % (resp, sid)
+                                    ora_upd(oracon, sid, 'ERROR', str(resp))
+                                print "%s %s %s %s %s" %(sid, cmd, icc_no, channel, time.strftime("%Y/%m/%d %H:%M:%S", time.localtime()))
+                            except Exception, msg:
+                                print "ERROR : "+str(msg)
+                                ora_upd(oracon, sid, 'ERROR', str(msg))
+                            sys.stdout.flush()
+
+                        # Sending commands to CA Gateway
+                        oracon.commit()
+                        print "%s Sending commands to CA Gateway" %(time.strftime("%Y/%m/%d %H:%M:%S", time.localtime()))
+                        sys.stdout.flush()
+                        x, y, z, idx, key = cafunc.seek_q(1)
+                        while x is not None:
+                            try:
+                                nop_flag = 1
+                                print y
+                                if gw_send(sock, y)>0:
+                                    cafunc.upd_q(idx, 2)
+                                    if ora_upd(oracon, key, 'SENT', None, y)<0:
+                                        oracon.se_close()
+                                        oracon = None
+                                        break
+                                else:
+                                    sock.close()
+                                    sock = None
+                                    time.sleep(2)
+                                    break
+                                x, y, z, idx, key = cafunc.seek_q(1)
+                                time.sleep(0.2)
+                            except Exception, msg:
+                                print msg
+                                if sock:
+                                    try:
+                                        sock.close()
+                                        sock = None
+                                    except:
+                                        pass
+                                    break
+                            sys.stdout.flush()
+                        oracon.commit()
+                    else:
+                        print ".",
+                else:
+                    print "%s Reconnect" % time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                sys.stdout.flush()
+
+                # recieving commands from CA Gateway
+                recv_str = gw_read(sock)
+                if recv_str is not None and recv_str!='ERROR':
+                    maxlen = len(recv_str)
+                    nop_flag = 1
+                    ofs = 0
+                    while ofs<maxlen:
+                        xlen = ord(recv_str[ofs+1])
+                        x = recv_str[ofs+2:ofs+2+xlen]
+                        sid = x[36:45]
+                        idx = cafunc.mapping_idx(sid)
+                        cafunc.rcv_q(idx, x)
+                        cafunc.upd_q(idx, 3)
+                        ofs = ofs+xlen+2
+                elif recv_str=='ERROR':
+                    print "Reading error...."+str(recv_str)
+                    time.sleep(2)
+                    oracon.se_close()
+                    oracon = None
+                    sock.close()
+                    sock = None
+                    continue
+                else:
+                    pass
+                #cafunc.print_q()
+                # Update Result
+                x, y, z, idx, key = cafunc.seek_q(-1)
+                x, y, z, idx, key = cafunc.seek_q(3)
+                while x is not None:
+                    try:
+                        nop_flag = 1
+                        print "%s, %d> %s" % (x, idx, z)
+                        sys.stdout.flush()
+                        cafunc.upd_q(idx, 0)
+                        result_str = cafunc.gw_msg(z)
+                        if ora_upd(oracon, key, 'OK', result_str, None, z)<0:
+                            oracon.se_close()
+                            oracon = None
+                            break
+                        x, y, z, idx, key = cafunc.seek_q(3)
+                    except Exception, msg:
+                        print msg
+                        if sock:
+                            try:
+                                sock.close()
+                                sock = None
+                            except:
+                                pass
+                            break
+                    sys.stdout.flush()
+
+                if nop_flag==0:
+                    x, y, z, idx, key = cafunc.seek_q(-1)
+                    x, y, z, idx, key = cafunc.seek_q(1)
+                    if x is not None:
+                        nop_flag = 1
+                    else:
+                        x, y, z, idx, key = cafunc.seek_q(-1)
+                        x, y, z, idx, key = cafunc.seek_q(2)
+                        if x is not None:
+                            nop_flag = 1
+                        else:
+                            x, y, z, idx, key = cafunc.seek_q(-1)
+                            x, y, z, idx, key = cafunc.seek_q(3)
+                            if x is not None:
+                                nop_flag = 1
+
+                if nop_flag<=0:
+                    nop_flag = nop_flag-1
+                if nop_flag<=-10:
+                    print "[Keep-alive]"
+                    cmdstr = cafunc.gw_keepalive(nowdate)
+                    if gw_send(sock, cmdstr)<0:
+                        sock.close()
+                        sock = None
+                        time.sleep(2)
+                    else:
+                        read_str = None
+                        loop = 0
+                        while (read_str is None or read_str=='ERROR') and loop<30:
+                            read_str = gw_read(sock)
+                            time.sleep(1)
+                            loop = loop+1
+                        if loop>=30:
+                            sock.close()
+                            sock = None
+                        nop_flag = 0
+                        time.sleep(5)
+
+                if data_flag==0:
+                    oracon.se_close()
+                    oracon = None
+                    time.sleep(15)
+                else:
+                    sql = "update cagw_seq set seq='%d' where sourceid=%d" % (cafunc.seqid, sourceid)
+                    oracon.execone(sql)
+                    oracon.commit()
+                    oracon.se_close()
+                    oracon = None
+                    time.sleep(2)
+            except Exception, msg:
+                print 'Error: '+str(msg)
+                try:
+                    oracon.se_close()
+                except:
+                    pass
+                oracon = None
+                if sock:
+                    try:
+                        sock.close()
+                    except:
+                        pass
+                    sock = None
+                time.sleep(15)
+        if oracon:
+            oracon.se_close()
+            oracon = None
+        if sock:
+            sock.close()
+            sock = None
+    except KeyboardInterrupt:
+        if oracon:
+            oracon.se_close()
+        if sock:
+            sock.close();
+        print "Interrupt...\n"
+        exit
+
+if __name__ == "__main__":
+    main()

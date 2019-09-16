@@ -1,0 +1,224 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+import os,sys,time
+from pysnmpclass import snmpclass
+from oraclass import ORA
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+pre_exec_time = 0
+agent = snmpclass(version='v2c',ptimeout=10,pretries=3,debug=0)
+
+if len(sys.argv)!=2:
+    print 'Error: Argument error'
+    sys.exit(0)
+
+so = sys.argv[1]
+
+if so.upper() != 'TFM' and so.upper() != 'KBRO1' and so.upper() != 'KBRO2':
+    print 'Error: Argument error'
+    sys.exit(0)
+
+
+def query_status(ycmtsid, yip, ymodel, ycomm, yoid):
+    global cmts_oid, agent
+    #print yoid
+    #print ycmtsid, yip, ymodel, ycomm
+
+    yresidx = []
+    yresult = {}
+
+    try:
+        for oname in yoid:
+            try:
+                tmp_mib = cmts_oid['%s-X' % (oname)]
+            except:
+                try:
+                    tmp_mib = cmts_oid['%s-%s' % (oname, ymodel)]
+                except:
+                    continue
+            rets = agent.snmpwalk([yip, '-c', ycomm, tmp_mib])
+            i = 0
+            lens = len(rets)
+            while i<lens:
+                zid = rets[i][0].replace(tmp_mib+'.','')
+                zidtmp=zid.split('.')
+                zid1=zidtmp[0]
+                zid2=zidtmp[1]
+                zvalue = rets[i][1]
+
+                yresult['%s-%s-%s' % (ycmtsid, oname, zid2)] = zvalue
+
+                if zid2 not in yresidx:
+                    yresidx.append(zid2)
+
+                i = i+1
+                print ycmtsid,oname,zid1,zid2,zvalue
+            print "%s (%s %s) -> %d" % (ycmtsid, oname, tmp_mib, lens)
+
+            sys.stdout.flush()
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+']:'+str(msg)
+
+    return yresidx, yresult
+
+while 1:
+    exec_time = int(time.time())
+
+    if exec_time-pre_exec_time>300:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] START'
+
+        cmts_oid = {}
+        oid_name = []
+
+        ora = ORA('nms@cnis')
+
+        if not ora.db:
+            print 'sleep 60secs ...'
+            time.sleep(60)
+            continue
+
+        # Get CMTS OID
+        SQL = "select name,upper(model) model,oid \
+               from snmp_mib \
+               where name in ('cmtsifCmActive','cmtsifCmTotal')"
+        rst = ora.execall(SQL)
+        if rst is not None and len(rst)>0:
+            for aw in rst:
+                try:
+                    xname = aw[0]
+                    xmodel = aw[1]
+                    xoid = aw[2]
+                    if xmodel is None:
+                        xmodel = 'X'
+                    cmts_oid[xname+'-'+xmodel] = xoid
+
+                    if xname not in oid_name:
+                        oid_name.append(xname)
+                except Exception, msg:
+                    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                    print '['+nowdate+']:'+str(msg)
+        else:
+            print "Error: SNMP_MIB is empty"
+            if ora.db:
+                ora.se_close()
+            print 'sleep 60secs ...'
+            time.sleep(60)
+            continue
+
+        cmts_so={}
+        cmts_id={}
+        cmts_ip={}
+        cmts_comm={}
+        cmts_model={}
+        cmts_cnt = 0
+
+        if so.upper() == 'TFM':
+            sosql = "a.companyno in ('101','103','104','300','701')"
+        elif so.upper() == 'KBRO1':
+            sosql = "a.companyno in ('106','210','220','230','240','250','260')"
+        else:
+            sosql = "a.companyno in ('310','330','410','420','610','810','820')"
+
+        cmtssql = "select a.companyno,a.cmts_id,a.ip,a.snmp_ro, \
+                   case \
+                     when upper(b.maker||b.model) like '%%ARRIS%%' then 'ARRIS' \
+                     else NULL end type \
+                   from cmts a \
+                   inner join sys_object b on b.ne_id=substr(a.cmts_id,-8,4) and b.stopyn='N' \
+                   where " + sosql + " and a.ip is not NULL and a.snmp_ro is not NULL and a.stopyn='N' and a.type='ARRIS'\
+                   order by a.companyno,a.cmts_id asc"
+        rs1 = ora.execall(cmtssql)
+        if rs1 is not None and len(rs1)>0:
+            for aw in rs1:
+                cmts_so[cmts_cnt] = aw[0]
+                cmts_id[cmts_cnt] = aw[1]
+                cmts_ip[cmts_cnt] = aw[2]
+                cmts_comm[cmts_cnt] = aw[3]
+                cmts_model[cmts_cnt] = aw[4]
+                cmts_cnt = cmts_cnt+1
+				
+        cmts_idx = 0
+        while cmts_idx<cmts_cnt:
+            try:
+                xso = cmts_so[cmts_idx]
+                xcmtsid = cmts_id[cmts_idx]
+                xIP = cmts_ip[cmts_idx]
+                xcomm = cmts_comm[cmts_idx]
+                xmodel = cmts_model[cmts_idx]
+
+                nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                print '['+nowdate+']', xso, xcmtsid, xIP, xcomm, xmodel
+
+                residx = []
+                result = {}
+                (residx, result) = query_status(xcmtsid, xIP, xmodel, xcomm, oid_name)
+                print 'residx=',residx,len(residx)
+                print 'result=',result
+
+                if residx is not None and len(residx)>0:
+                    j = 0
+                    t_cmactive = 0
+                    t_cmtotal = 0
+                    for xid in residx:
+                        try:
+                            cmactive = int(result[xcmtsid+'-cmtsifCmActive-'+str(xid)])
+                        except:
+                            cmactive = -1
+                        try:
+                            cmtotal = int(result[xcmtsid+'-cmtsifCmTotal-'+str(xid)])
+                        except:
+                            cmtotal = -1
+
+                        if int(xid) < 100000000:
+                        		t_cmactive = t_cmactive + cmactive
+                        		t_cmtotal = t_cmtotal + cmtotal
+                        
+                        if cmactive >= 0 and cmtotal >= 0:
+                            SQL = "select ifindex from cmts_if where companyno='%s' and cmts_id='%s' and ifindex=%d" % (xso, xcmtsid, int(xid))
+                            rs2 = ora.execall(SQL)
+                            reclen = len(rs2)
+                            if rs2 is not None and reclen>0:
+                                SQL = "update cmts_if set cmactive=%d,cmtotal=%d,synctime=sysdate where companyno='%s' and cmts_id='%s' and ifindex=%d" % (cmactive,cmtotal,xso,xcmtsid,int(xid))
+                            else:
+                                SQL = "insert into cmts_if (companyno,cmts_id,ifindex,cmactive,cmtotal,synctime) values ('%s','%s',%d,%d,%d,sysdate)" % (xso,xcmtsid,int(xid),cmactive,cmtotal)
+                            #print i, '/', ifnum, ':', SQL
+                            print SQL
+                            ora.execone(SQL)
+                            j = j+1
+                            if (j%50)==0:
+                                ora.commit()
+                                sys.stdout.flush()
+                
+                    if j > 0:
+                        SQL = "update cmts set cmactive=%d,cmtotal=%d,synctime=sysdate where companyno='%s' and cmts_id='%s'" % (t_cmactive, t_cmtotal, xso, xcmtsid)
+                        print SQL
+                        ora.execone(SQL)
+                        ora.commit()
+                        sys.stdout.flush()
+
+            except Exception, detail:
+                print '['+nowdate+']', xso, xcmtsid, detail
+
+            ora.commit()
+            sys.stdout.flush()
+            cmts_idx = cmts_idx+1
+
+        if ora.db:
+            ora.se_close()
+
+        pre_exec_time = exec_time
+
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] END'
+        sys.stdout.flush()
+
+    print 'sleep 30secs ...'
+    sys.stdout.flush()
+    time.sleep(30)
+

@@ -1,0 +1,382 @@
+#!/usr/bin/env python
+# -*- coding: big5 -*-
+#
+# HFC品質改善單 - 區域性訊號異常
+# HFC品質改善單 - CM品質US-SNR異常
+#
+import sys,datetime,time
+import pymssql
+from oraclass import ORA
+
+def OEMS_unity(so, node, msg, alert):
+    global ora_oems, so_name
+
+    reason = "CM品質US-SNR異常(%s,%s)" % (so, node)
+    node_info = "%s-%s" % (so, node)
+    oraqrysql = "select sid,status from oems_tickets_main where normal_flag='I' and type='4301' and subtype='430102' and close_date is null and impact_list='%s'" % (node_info)
+    sid = -1
+    ostatus = 5110
+    rs = ora_oems.execall(oraqrysql)
+    if rs is not None and len(rs) > 0:
+        for a_row in rs:
+            sid = int(a_row[0])
+            ostatus = a_row[1]
+    print 'SID:',sid
+    if alert=='Y':
+        if sid<0:
+            oraupdsql = "begin insert into oems_tickets_main (status,type,subtype,reason,descr,create_date,operator,account,normal_flag,impact_list,key,sub_key) values ('5110',4301,430102,'%s','%s',sysdate,'%s','CMTSMON','I','%s','3303','330305') return to_char(sid) into :1 ; end;" % (reason, msg, so_name[so], node_info)
+            print oraupdsql
+            try:
+                oems_sid_ary = ora_oems.db.BindingArray(1,12,'SQLT_STR')
+                ora_oems.c.execute(oraupdsql, oems_sid_ary)
+                sid = int(oems_sid_ary[0])
+            except:
+                print 'Exception: Unable to insert OEMS_TICKETS_MAIN'
+
+            oraupdsql = "insert into oems_impact (sid,type,value,companyno,getimpactsubsid,result,node) values (%d,'NODE','%s','%s',sysdate,'OK','%s')" % (sid, node, so, node)
+            print oraupdsql
+            try:
+                ora_oems.execone(oraupdsql)
+            except:
+                print 'Exception: Unable to insert OEMS_IMPACT'
+
+        oraupdsql = "insert into oems_tickets_log (sid,status_date,orig_status,status,descr,account) values (%d,sysdate,%d,%d,'%s','CMTSMON')" % (sid,ostatus,ostatus,msg)
+        print oraupdsql
+        try:
+            ora_oems.execone(oraupdsql)
+        except:
+            print 'Exception: Unable to insert OEMS_TICKETS_LOG'
+    elif sid>0:
+        new_status = ostatus
+        if alert=='C':
+            new_status = 5105
+            oraupdsql = "update oems_tickets_main set status=5105,close_date=sysdate where sid=%d and status='5104'" % (sid)
+            print oraupdsql
+            print 'Close:',sid,new_status
+            try:
+                ora_oems.execone(oraupdsql)
+            except:
+                print 'Exception: Unable to update OEMS_TICKETS_MAIN'
+
+        oraupdsql = "insert into oems_tickets_log (sid,status_date,orig_status,status,descr,account) values (%d,sysdate,%d,%d,'%s','CMTSMON')" % (sid,ostatus,new_status,msg)
+        print oraupdsql
+        try:
+            ora_oems.execone(oraupdsql)
+        except:
+            print 'Exception: Unable to update OEMS_TICKETS_LOG'
+
+    ora_oems.commit()
+
+
+if len(sys.argv) != 2:
+    print 'usage:',sys.argv[0],'CompanyNo'
+    sys.exit(0)
+
+so = sys.argv[1]
+
+oracon = ORA('nms@cnis')
+if not oracon.db:
+    sys.exit(0)
+
+ora_oems = ORA('OEMS@KBRO_NMSDB')
+if not ora_oems.db:
+    sys.exit(0)
+
+nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print '['+nowdate+'] START'
+
+so_name = {}
+qry = "select companyno,oemsno from so where oemsno is not null"
+rs = oracon.execall(qry)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+        so_name[a_row[0]] = int(a_row[1])
+
+# ulrcvpwr v1 RXPWR   CmStatusRxPower   CMTS上行接收功
+# dlrcvpwr v2 CMRXPWR DSPower.3         CM下行接收功率
+# cmulpwr  v3 CMTXPWR CmStatusTxPower.2 CM上行發射功率
+
+#
+qry = "select companyno,node,sum(q_rxpwr) q_rxpwr,sum(q_cmrxpwr) q_cmrxpwr,sum(q_cmtxpwr) q_cmtxpwr,sum(q_dlsnr) q_dlsnr,sum(q_ulsnr) q_ulsnr,sum(q_t3) q_t3,sum(q_t4) q_t4 from v_cnis_cm_qos where companyno='%s' group by companyno,node" % (so)
+print qry
+rs = oracon.execall(qry)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+        companyno = a_row[0]
+        nodeno = a_row[1]
+        q_rxpwr = int(a_row[2])
+        q_cmrxpwr = int(a_row[3])
+        q_cmtxpwr = int(a_row[4])
+        q_dlsnr = int(a_row[5])
+        q_ulsnr = int(a_row[6])
+        q_t3 = int(a_row[7])
+        q_t4 = int(a_row[8])
+        print companyno,nodeno,q_rxpwr,q_cmrxpwr,q_cmtxpwr,q_dlsnr,q_ulsnr,q_t3,q_t4
+
+        oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'RXPWR'); end;" % (companyno, nodeno, q_rxpwr)
+        try:
+            oracon.execone(oraupdsql)
+        except Exception, detail:
+            print '%s -> %s' % (oraupdsql, detail)
+
+        oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'CMRXPWR'); end;" % (companyno, nodeno, q_cmrxpwr)
+        try:
+            oracon.execone(oraupdsql)
+        except Exception, detail:
+            print '%s -> %s' % (oraupdsql, detail)
+
+        oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'CMTXPWR'); end;" % (companyno, nodeno, q_cmtxpwr)
+        try:
+            oracon.execone(oraupdsql)
+        except Exception, detail:
+            print '%s -> %s' % (oraupdsql, detail)
+
+        oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'DLSNR'); end;" % (companyno, nodeno, q_dlsnr)
+        try:
+            oracon.execone(oraupdsql)
+        except Exception, detail:
+            print '%s -> %s' % (oraupdsql, detail)
+
+        oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'ULSNR'); end;" % (companyno, nodeno, q_ulsnr)
+        try:
+            oracon.execone(oraupdsql)
+        except Exception, detail:
+            print '%s -> %s' % (oraupdsql, detail)
+
+        oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'T3'); end;" % (companyno, nodeno, q_t3)
+        try:
+            oracon.execone(oraupdsql)
+        except Exception, detail:
+            print '%s -> %s' % (oraupdsql, detail)
+
+        oraupdsql = "begin proc_cnis_upd_node_info_ext('%s','%s','',%d,'T4'); end;" % (companyno, nodeno, q_t4)
+        try:
+            oracon.execone(oraupdsql)
+        except Exception, detail:
+            print '%s -> %s' % (oraupdsql, detail)
+
+        oracon.commit()
+        sys.stdout.flush()
+
+#
+node_arr = {}
+node_cnt = 0
+qry = "select node,alert from node_info where companyno='%s' and monitor='Y' order by node" % (so)
+print qry
+rs = oracon.execall(qry)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+        node = a_row[0]
+        alert = a_row[1]
+        node_arr['A-'+node] = alert
+        node_arr['B-'+node] = 'N'
+        node_arr['NODE-'+str(node_cnt)] = node
+        node_cnt = node_cnt+1
+else:
+    print "Error: NODE_INFO is empty"
+
+qry = "select node,cm_cnt,abnormal_cm_cnt,q_rxpwr,q_cmrxpwr,q_cmtxpwr,q_dlsnr,q_ulsnr,q_t3,q_t4 from v_cnis_cm_qos_stat where companyno='%s'" % (so)
+print qry
+rs = oracon.execall(qry)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+        node = a_row[0]
+        cm_cnt = int(a_row[1])
+        abnormal_cm_cnt = int(a_row[2])
+        rxpwr = a_row[3]
+        cm_rxpwr = a_row[4]
+        cm_txpwr = a_row[5]
+        dlsnr = a_row[6]
+        ulsnr = a_row[7]
+        t3 = a_row[8]
+        t4 = a_row[9]
+
+        active_flag = 0
+        if cm_cnt>30 and (abnormal_cm_cnt*100/cm_cnt)>30:
+            active_flag = 1
+        elif abnormal_cm_cnt>30:
+            active_flag = 1
+        elif cm_cnt>30 and (abnormal_cm_cnt*100/cm_cnt)<10:
+            active_flag = 9
+        elif abnormal_cm_cnt<3:
+            active_flag = 9
+
+        if active_flag==1:
+            try:
+                alert = node_arr['A-'+node]
+            except:
+                print "array not found.(%s)" % ('A-'+node)
+                alert = ''
+            print so,node,cm_cnt,abnormal_cm_cnt,alert
+            if alert=='N':
+                msg = "NODE(%s)所屬CM品質低於標準(總數:%d,不合格數:%d,RXPWR:%d,CMRXPWR:%d,CMTXPWR:%d,USSNR:%d,DSSNR:%d,T3:%d,T4:%d)" % (node,cm_cnt,abnormal_cm_cnt,rxpwr,cm_rxpwr,cm_txpwr,ulsnr,dlsnr,t3,t4)
+                OEMS_unity(so, node, msg, 'Y')
+                node_arr['B-'+node] = 'Y'
+                oraupdsql = "update node_info set alert='Y',alerttime=sysdate where companyno='%s' and node='%s'" % (so, node);
+                print oraupdsql
+                try:
+                    oracon.execone(oraupdsql)
+                    oracon.commit()
+                except:
+                    print 'Exception: Unable to update NODE_INFO'
+            elif alert=='Y':
+                node_arr['B-'+node] = 'Y'
+        elif active_flag==9:
+            node_arr['B-'+node] = 'C'
+        sys.stdout.flush()
+
+for i in range(0, node_cnt):
+    node = node_arr['NODE-'+str(i)]
+    try:
+        if node_arr['A-'+node]=='Y' and node_arr['B-'+node]=='N':
+            msg = "NODE(%s)所屬CM品質已低於異常標準, 但未達結案標準" % (node)
+            OEMS_unity(so, node, msg, 'N')
+            oraupdsql = "update node_info set alert='U',ceasetime=sysdate where companyno='%s' and node='%s'" % (so, node);
+            print oraupdsql
+            try:
+                oracon.execone(oraupdsql)
+                oracon.commit()
+            except:
+                print 'Exception: Unable to update NODE_INFO'
+        elif (node_arr['A-'+node]=='Y' or node_arr['A-'+node]=='U') and node_arr['B-'+node]=='C':
+            msg = "NODE(%s)所屬CM品質已符合標準, 已達結案標準" % (node)
+            OEMS_unity(so, node, msg, 'C')
+            oraupdsql = "update node_info set alert='N',ceasetime=sysdate where companyno='%s' and node='%s'" % (so, node);
+            print oraupdsql
+            try:
+                oracon.execone(oraupdsql)
+                oracon.commit()
+            except:
+                print 'Exception: Unable to update NODE_INFO'
+    except:
+        pass
+    sys.stdout.flush()
+
+#
+try:
+    if so=='106':
+        con = pymssql.connect(dsn='cnis_web@CossMS_CG_CP950')
+    elif so in ['101','103','104','300','701']:
+        con = pymssql.connect(dsn='cnis_web@TFMCossMS_CP950_HUGE')
+    else:
+        con = pymssql.connect(dsn='cnis_web@kbroCossMS_CP950_HUGE')
+    cur = con.cursor()
+except Exception, errmesg:
+    print 'Error:',errmesg
+    sys.exit(0)
+
+qry = "select a.companyno,a.worksheet,b.subsid,a.custname,a.mduname,a.mscitya,a.msdistricta,a.instaddrname,b.servicename,a.nodeno,a.linkid,b.backcause1 \
+       from ms0300 a with (nolock) \
+       inner join ms0301 b with (nolock) on b.companyno=a.companyno and b.worksheet=a.worksheet \
+       where a.companyno='%s' and substring(a.workkind,1,1)='5' and substring(b.servicename,1,1) in ('1','2','3','7','9') \
+       and substring(b.sheetstatus,1,1) = '4' and substring(b.backcause1,1,5) = 'C0805' and b.cleandate >= getdate()-(1.0/24) \
+       group by a.companyno,a.worksheet,b.subsid,a.custname,a.mduname,a.mscitya,a.msdistricta,a.instaddrname,b.servicename,a.nodeno,a.linkid,b.backcause1" % (so)
+print qry
+cur.execute(qry)
+workarr = cur.fetchall()
+for wrk in workarr:
+    companyno = wrk[0]
+    worksheet = wrk[1]
+    subsid = int(wrk[2])
+    custname = wrk[3]
+    mduname = wrk[4]
+    city = wrk[5]
+    district = wrk[6]
+    addrname = wrk[7]
+    servicename = wrk[8]
+    nodeno = wrk[9]
+    linkid = wrk[10]
+    backcause = wrk[11]
+
+    descr = ''
+    qry = "select node,cm_cnt,abnormal_cm_cnt,q_rxpwr,q_cmrxpwr,q_cmtxpwr,q_dlsnr,q_ulsnr,q_t3,q_t4 from v_cnis_cm_qos_stat where companyno='%s' and node='%s'" % (companyno, nodeno)
+    print qry
+    rs = oracon.execall(qry)
+    if rs != None and len(rs) > 0:
+        for a_row in rs:
+            q_cm_cnt = a_row[1]
+            q_abnormal_cm_cnt = a_row[2]
+            q_rxpwr = a_row[3]
+            q_cm_rxpwr = a_row[4]
+            q_cm_txpwr = a_row[5]
+            q_dlsnr = a_row[6]
+            q_ulsnr = a_row[7]
+            q_t3 = a_row[8]
+            q_t4 = a_row[9]
+            descr = "NODE(%s)所屬CM品質(總數:%d,不合格數:%d,RXPWR:%d,CMRXPWR:%d,CMTXPWR:%d,USSNR:%d,DSSNR:%d,T3:%d,T4:%d)" % (nodeno,q_cm_cnt,q_abnormal_cm_cnt,q_rxpwr,q_cm_rxpwr,q_cm_txpwr,q_ulsnr,q_dlsnr,q_t3,q_t4)
+
+    sid = -1
+    status = 5110
+    qry = "select a.sid,a.status from oems_tickets_main a inner join oems_impact_subscrid b on b.sid=a.sid \
+           where a.normal_flag='I' and a.type='4301' and a.subtype='430101' and a.close_date is null and a.operator='%d' and a.impact_list='%s-%s' and b.subsid='%d'" % (so_name[companyno], companyno, nodeno, subsid)
+    print qry
+    rs = ora_oems.execall(qry)
+    if rs is not None and len(rs) > 0:
+        for a_row in rs:
+            sid = int(a_row[0])
+            status = int(a_row[1])
+    print 'OEMS_ID:',sid,status
+
+    if sid > 0:
+        oraupdsql = "insert into oems_tickets_log (sid,orig_status,status,descr,account) values (%d,%d,%d,'%s','CMTSMON')" % (sid, status, status, descr)
+        print oraupdsql
+        try:
+            ora_oems.execone(oraupdsql)
+            #pass
+        except:
+            print 'Exception: Unable to insert OEMS_TICKETS_LOG'
+    else:
+        oraupdsql = "begin insert into oems_tickets_main (status,type,subtype,reason,descr,operator,account,normal_flag,impact_list,key,sub_key) values ('%d','4301','430101','區域性訊號異常(%s,%s)','%s','%d','CMTSMON','I','%s-%s','3303','330305') return to_char(sid) into :1 ; end;" % (status, companyno, nodeno, descr, so_name[companyno], companyno, nodeno)
+        print oraupdsql
+        try:
+            oems_sid_ary = ora_oems.db.BindingArray(1,12,'SQLT_STR')
+            ora_oems.c.execute(oraupdsql, oems_sid_ary)
+            sid = int(oems_sid_ary[0])
+            #pass
+        except:
+            print 'Exception: Unable to insert OEMS_TICKETS_MAIN'
+
+        if sid > 0:
+            oraupdsql = "insert into oems_impact (sid,type,value,companyno,getimpactsubsid,result,node,area) values (%d,'NODE','%s','%s',sysdate,'OK','%s','%s-%s')" % (sid, nodeno, companyno, nodeno, city, district)
+            print oraupdsql
+            try:
+                ora_oems.execone(oraupdsql)
+                #pass
+            except:
+                print 'Exception: Unable to insert OEMS_IMPACT'
+
+            oraupdsql = "insert into oems_impact_subscrid (sid,companyno,subsid,servicename,subsname,nodeno,addrname,mduname,linkid,create_date) values (%d,'%s','%s','%s','%s','%s','%s','%s','%s',sysdate)" % (sid, companyno, subsid, servicename, custname, nodeno, addrname, mduname, linkid)
+            print oraupdsql
+            try:
+                ora_oems.execone(oraupdsql)
+                #pass
+            except:
+                print 'Exception: Unable to insert OEMS_IMPACT_SUBSCRID'
+        else:
+            print 'Exception: Unable to insert OEMS_TICKETS_MAIN'
+
+    ora_oems.commit()
+    sys.stdout.flush()
+
+# 更新 5104 -> 5105
+oraupdsql = "update oems_tickets_main set status='5105' where normal_flag='I' and type='4301' and subtype='430101' and status='5104' and account='CMTSMON'"
+print oraupdsql
+try:
+    ora_oems.execone(oraupdsql)
+    ora_oems.commit()
+    #pass
+except:
+    print 'Exception: Unable to update OEMS_TICKETS_MAIN'
+
+
+nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s] END\n" % (nowdate)
+
+if con is not None:
+    con.close()
+if oracon.db is not None:
+    oracon.se_close()
+if ora_oems.db is not None:
+    ora_oems.se_close()
+
+sys.exit(0)

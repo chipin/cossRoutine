@@ -1,0 +1,405 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+import os,sys,time
+import string,socket,binascii,select
+from oraclass import ORA
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+def get_pkt(p, bg, l, type):
+    i = 0
+    r = ''
+    while i<l:
+        r = r+p[bg+i]
+        i = i+1
+    if type=='str':
+        return r
+    elif type=='int':
+        r1 = ord(r[0])
+        r2 = ord(r[1])
+        if l>=4:
+            r3 = ord(r[2])
+            r4 = ord(r[3])
+            return (r1<<24)+(r2<<16)+(r3<<8)+(r4)
+        return (r1<<8)+(r2)
+    elif type=='ip':
+        return "%d.%d.%d.%d" % (ord(r[0]),ord(r[1]),ord(r[2]),ord(r[3]))
+    elif type=='ord':
+        return ord(r)
+    elif type=='hex':
+        s = ''
+        i = 0
+        while i<len(r):
+            s = s+"%.2X"%(ord(r[i]))
+            i = i+1
+        return s
+
+def prn_data(d):
+    k = 0;
+    while k<len(d):
+        pp = ""
+        i = 0
+        while i<16:
+            if k+i>=len(d):
+                j = k+i
+                while j<k+16:
+                    print "  ",
+                    j = j+1
+                break
+            pp = d[k+i]
+            vs = binascii.hexlify(pp)
+            print vs,
+            i = i+1
+        print " - ",
+        pp = ""
+        i = 0
+        while i<16:
+            if k+i>=len(d): break
+            pp = d[k+i]
+            if pp in (string.digits+string.letters+string.punctuation):
+                print pp,
+            else:
+                print "?",
+            i = i+1
+        print ""
+        k = k+16
+    print ""
+
+def make_option(p):
+    opt = {}
+    i = 240
+    optidx = 0
+    while i<len(p):
+        if ord(p[i])==255:
+            break
+        opt['OPTION-'+str(optidx)] = ord(p[i])
+        opt['LEN-'+str(optidx)] = ord(p[i+1])
+        i = i+2
+        j = 0
+        opt['OPTVAL-'+str(opt['OPTION-'+str(optidx)])] = ''
+        while j<opt['LEN-'+str(optidx)]:
+            opt['OPTVAL-'+str(opt['OPTION-'+str(optidx)])] = opt['OPTVAL-'+str(opt['OPTION-'+str(optidx)])]+p[i+j]
+            j = j+1
+        i = i+j
+        optidx = optidx+1
+        opt['OPTCNT'] = optidx
+        opt['OPTLEN'] = i-240+1
+    return opt
+
+def lease_query(loop, cnrip, destip, type='CNR', timeout=15.0):
+    sid = loop
+    sid_1 = (sid & 0xFF000000)>>24
+    sid_2 = (sid & 0x00FF0000)>>16
+    sid_3 = (sid & 0x0000FF00)>>8
+    sid_4 = (sid & 0x000000FF)
+    seq = chr(sid_1)+chr(sid_2)+chr(sid_3)+chr(sid_4)
+    mac = chr(0)+chr(0)+chr(0)+chr(0)+chr(0)+chr(0)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1)
+    s.bind(('0.0.0.0',67))
+
+    buf = chr(1)+chr(1)+chr(6)+chr(0)
+    buf = buf+seq
+    buf = buf+chr(0)+chr(0)+chr(0x0)+chr(0)
+    print '#'+str(loop),cnrip,'=>',destip
+    try:
+        cpeip = destip.split('.')
+    except Exception, detail:
+        print 'lease_query() - ERROR: '+str(detail)
+        return None,None,None
+    ip1 = int(cpeip[0])
+    ip2 = int(cpeip[1])
+    ip3 = int(cpeip[2])
+    ip4 = int(cpeip[3])
+    orig_cpeip = chr(ip1)+chr(ip2)+chr(ip3)+chr(ip4)
+    buf = buf+chr(ip1)+chr(ip2)+chr(ip3)+chr(ip4)
+    buf = buf+chr(0)+chr(0)+chr(0)+chr(0)
+    buf = buf+chr(0)+chr(0)+chr(0)+chr(0)
+
+    #if cnrip[:7]=='10.222.' or cnrip[:11]=='192.168.50.' or cnrip[:12]=='192.168.136.' or cnrip[:12]=='192.168.144.' or cnrip[:12]=='192.168.152.' or cnrip[:12]=='192.168.160.' or cnrip[:12]=='192.168.169.':
+    #elif cnrip[:7]=='172.16.' or cnrip[:8]=='192.168.':
+    if cnrip[:7]=='172.16.' or cnrip[:11]=='192.168.15.':
+        buf = buf+chr(172)+chr(16)+chr(13)+chr(72) # Relay IP
+    elif cnrip[:7]=='10.222.' or cnrip[:7]=='10.220.' or cnrip[:8]=='192.168.':
+        #buf = buf+chr(10)+chr(222)+chr(11)+chr(72) # Relay IP
+        buf = buf+chr(192)+chr(168)+chr(130)+chr(72) # Relay IP
+    else:
+        buf = buf+chr(123)+chr(193)+chr(111)+chr(204) # Relay IP
+    buf = buf+mac
+    i = 0
+    while i<10:
+        buf = buf + chr(0)
+        i = i+1
+    i = 0
+    while i<64:
+        buf = buf + chr(0)
+        i = i+1
+    i = 0
+    while i<128:
+        buf = buf + chr(0)
+        i = i+1
+    buf = buf+chr(0x63)+chr(0x82)+chr(0x53)+chr(0x63)
+    p_head = buf
+    if type=='CNR':
+        p_query = p_head+chr(0x35)+chr(0x01)+chr(0x0d)+chr(0x37)+chr(0x01)+chr(0x52)
+    else:
+        p_query = p_head+chr(0x35)+chr(0x01)+chr(0x0a)
+    p_query = p_query + chr(0xff)
+
+    s.sendto(p_query,(cnrip,67))
+    iwtd = []
+    check_flag = 0
+    return_value = -1
+    dhcp_opt82 = offer_mac = ''
+    while check_flag==0:
+        while 1:
+            iwtd, owtd, ewtd = select.select([s], [], [], timeout)
+            break
+        if iwtd:
+            p_ack, Addr = s.recvfrom(1500)
+            #offer_seq = p_ack[4]+p_ack[5]+p_ack[6]+p_ack[7]
+            offer_cip = p_ack[12]+p_ack[13]+p_ack[14]+p_ack[15]
+            #offer_oip = p_ack[16]+p_ack[17]+p_ack[18]+p_ack[19]
+            #offer_nextip = p_ack[20]+p_ack[21]+p_ack[22]+p_ack[23]
+            #offer_relayip = p_ack[24]+p_ack[25]+p_ack[26]+p_ack[27]
+            offer_mac = "%.2X%.2X%.2X%.2X%.2X%.2X" % (ord(p_ack[28]),ord(p_ack[29]),ord(p_ack[30]),ord(p_ack[31]),ord(p_ack[32]),ord(p_ack[33]))
+            if offer_mac=='000000000000':
+                print Addr
+                prn_data(p_ack)
+                sys.stdout.flush()
+            #print 'MAC: %s' % (offer_mac)
+            option = make_option(p_ack)
+            try:
+                dhcp_type = ord(option['OPTVAL-53'])
+                if dhcp_type==1:
+                    print "DISCOVER IP: ", Addr
+                    prn_data(p_ack)
+                    sys.stdout.flush()
+                    return_value = 1
+                    check_flag = 1
+                    continue
+            except Exception, detail:
+                print 'lease_query() - ERROR: '+str(detail)
+            try:
+                vtmp = option['OPTVAL-82']
+                i = 0
+                opt82 = {}
+                while i<len(vtmp):
+                    subopt = ord(vtmp[i])
+                    vlen = ord(vtmp[i+1])
+                    opt82[subopt] = get_pkt(vtmp, i+2, vlen, 'hex')
+                    dhcp_opt82 = dhcp_opt82+opt82[subopt]+','
+                    i = i+vlen+2
+                try:
+                    subopt_1 = str(opt82[1])
+                except:
+                    subopt_1 = 'X'
+                try:
+                    subopt_2 = str(opt82[2])
+                except:
+                    subopt_2 = 'X'
+                dhcp_opt82 = subopt_1+','+subopt_2+','
+                print dhcp_opt82
+            except Exception, detail:
+                print 'lease_query() - ERROR: '+str(detail)
+            if orig_cpeip==offer_cip:
+                print '+++ DHCPACK'
+                check_flag = 1
+                return_value = 0
+                #prn_data(p_ack)
+            else:
+                print '--- DHCPNACK'
+                return_value = 1
+                check_flag = 1
+                prn_data(p_ack)
+        else:
+            print '--- Timeout'
+            check_flag = 1
+            return_value = -1
+        sys.stdout.flush()
+    s.close()
+    sys.stdout.flush()
+    return return_value,offer_mac,dhcp_opt82
+
+
+nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print nowdate
+
+for qq in range(3):
+    oracon = ORA('nms@cnis')
+    if oracon.db is not None:
+        break
+    else:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] Error: Unable to connect to DB [NMS@CNIS][RETRY]'
+        sys.stdout.flush()
+        time.sleep(60)
+if oracon.db is None:
+    sys.exit(0)
+
+cnrip_arr = {}
+cnrip2_arr = {}
+SQL = "select companyno,cnr_id,cnr_id2,ip,ip2 from cnr where stopyn='N' and ip is not null order by companyno"
+print SQL
+try:
+    rst = oracon.execall(SQL)
+    if rst is not None and len(rst) > 0:
+        for aw in rst:
+            so = aw[0]
+            cnrid = aw[1]
+            cnrid2 = aw[2]
+            cnrip = aw[3]
+            cnrip2 = aw[4]
+            print so,cnrid,cnrid2,cnrip,cnrip2
+            cnrip_arr[cnrid] = cnrip
+            cnrip_arr[cnrid2] = cnrip
+            cnrip2_arr[cnrid] = cnrip2
+            cnrip2_arr[cnrid2] = cnrip2
+except Exception, msg:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] Except: '+str(msg)
+
+if cnrip_arr is None or len(cnrip_arr) <= 0:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] Error: CNR is empty [CNIS]'
+    if oracon.db is not None:
+        oracon.se_close()
+    sys.exit(0)
+#print cnrip_arr
+#print cnrip2_arr
+
+for qq in range(3):
+    oracon2 = ORA('qos@cnis')
+    if oracon2.db is not None:
+        break
+    else:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] Error: Unable to connect to DB [QOS@CNIS][RETRY]'
+        sys.stdout.flush()
+        time.sleep(60)
+if oracon2.db is None:
+    sys.exit(0)
+
+SQL2 = "select sid,cnr_id,ip from cnr_leaseqry_queue where create_date >= sysdate-600/86400 and status='INIT' and cnr_id not in ('NTP_CNR1_002') order by sid"
+SQL3 = "select sid,cnr_id,ip from speedtest where time >= sysdate-1 and status='INIT'  and cnr_id is not null order by sid"
+print SQL2
+print SQL3
+
+xloop = 0
+while 1:
+    try:
+        oracon.execone('select sysdate from dual')
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] Error: Lost connection to DB [NMS@CNIS][RETRY] '+str(msg)
+
+        for qq in range(3):
+            oracon = ORA('nms@cnis')
+            if oracon.db is not None:
+                break
+            else:
+                nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                print '['+nowdate+'] Error: Unable to connect to DB [NMS@CNIS][RETRY]'
+                sys.stdout.flush()
+                time.sleep(60)
+    if oracon.db is not None:
+        try:
+            rs = None
+            rs = oracon.execall(SQL2)
+            if rs != None and len(rs) > 0:
+                for row in rs:
+                    sid = row[0]
+                    cnrid = row[1]
+                    ip = row[2]
+                    ret = 1
+                    ret2 = 0
+                    while ret>0 and ret2<4:
+                        try:
+                            if ret2 >= 2 and cnrip2_arr[cnrid] is not None and len(cnrip2_arr[cnrid]) > 0:
+                                host = cnrip2_arr[cnrid]
+                            else:
+                                host = cnrip_arr[cnrid]
+                            ret,dhcp_mac,dhcp_opt82 = lease_query(xloop,host,ip)
+                        except Exception, msg:
+                            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                            print '['+nowdate+'] Except: '+str(msg)
+                        if ret==0:
+                            rst_sql = "update cnr_leaseqry_queue set status='OK',status_date=sysdate,mac='%s',opt82='%s' where sid=%d" % (dhcp_mac, dhcp_opt82, sid)
+                        elif ret<0:
+                            rst_sql = "update cnr_leaseqry_queue set status='TIMEOUT',status_date=sysdate where sid=%d" % (sid)
+                        else:
+                            rst_sql = "update cnr_leaseqry_queue set status='NACK',status_date=sysdate where sid=%d" % (sid)
+                        print rst_sql
+                        sys.stdout.flush()
+                        oracon.execone(rst_sql)
+                        oracon.commit()
+                        ret2 = ret2+1
+                        xloop = xloop+1
+            print '.',
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print '['+nowdate+'] Except: '+str(msg)
+
+    try:
+        oracon2.execone('select sysdate from dual')
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] Error: Lost connection to DB [QOS@CNIS][RETRY] '+str(msg)
+
+        for qq in range(3):
+            oracon2 = ORA('qos@cnis')
+            if oracon2.db is not None:
+                break
+            else:
+                nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                print '['+nowdate+'] Error: Unable to connect to DB [QOS@CNIS][RETRY]'
+                sys.stdout.flush()
+                time.sleep(60)
+    if oracon2.db is not None:
+        try:
+            rs = None
+            rs = oracon2.execall(SQL3)
+            if rs != None and len(rs) > 0:
+                for row in rs:
+                    sid = row[0]
+                    cnrid = row[1]
+                    ip = row[2]
+                    ret = 1
+                    ret2 = 0
+                    while ret>0 and ret2<4:
+                        try:
+                            if ret2 >= 2 and cnrip2_arr[cnrid] is not None and len(cnrip2_arr[cnrid]) > 0:
+                                host = cnrip2_arr[cnrid]
+                            else:
+                                host = cnrip_arr[cnrid]
+                            ret,dhcp_mac,dhcp_opt82 = lease_query(xloop,host,ip)
+                        except Exception, msg:
+                            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                            print '['+nowdate+'] Except: '+str(msg)
+                        if ret==0:
+                            rst_sql = "update speedtest set status='OK',utime=sysdate,mac='%s',opt82='%s' where sid=%d" % (dhcp_mac, dhcp_opt82, sid)
+                        elif ret<0:
+                            rst_sql = "update speedtest set status='TIMEOUT',utime=sysdate where sid=%d" % (sid)
+                        else:
+                            rst_sql = "update speedtest set status='NACK',utime=sysdate where sid=%d" % (sid)
+                        print rst_sql
+                        sys.stdout.flush()
+                        oracon2.execone(rst_sql)
+                        oracon2.commit()
+                        ret2 = ret2+1
+                        xloop = xloop+1
+            print '.',
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print '['+nowdate+'] Except: '+str(msg)
+
+    sys.stdout.flush()
+    time.sleep(5)
+
+if oracon.db is not None:
+    oracon.se_close()
+if oracon2.db is not None:
+    oracon2.se_close()

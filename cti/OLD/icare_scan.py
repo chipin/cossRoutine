@@ -1,0 +1,256 @@
+#!/usr/bin/env python
+# -*- coding: Big5 -*-
+import sys,string,time
+import pymssql
+from oraclass import ORA
+
+if len(sys.argv) != 2:
+    print 'Usage:',sys.argv[0],'[ TFM | KBRO | CG ]'
+    sys.exit(0)
+
+p_so = sys.argv[1].upper()
+
+if p_so != 'TFM' and p_so != 'KBRO' and p_so != 'CG':
+    print 'usage:',sys.argv[0],'[TFM|KBRO|CG]'
+    sys.exit(0)
+
+if p_so=='TFM':
+    con = pymssql.connect(dsn='cnis_web@TFMCossMS_CP950_HUGE')
+    oracon_cti = ORA('CTI@CNIS')
+    oracon_oems = ORA('OEMS@KBRO_NMSDB')
+elif p_so=='KBRO':
+    con = pymssql.connect(dsn='cnis_web@kbroCossMS_CP950_HUGE')
+    oracon_cti = ORA('CTI@KBRO_NMSDB')
+    oracon_oems = ORA('OEMS@KBRO_NMSDB')
+elif p_so=='CG':
+    con = pymssql.connect(dsn='cnis_web@CossMS_CG_CP950')
+    oracon_cti = ORA('CTI@KBRO_NMSDB')
+    oracon_oems = ORA('OEMS@KBRO_NMSDB')
+
+try:
+    cur = con.cursor()
+except Exception, errmesg:
+    print 'Error:',errmesg
+    sys.exit(0)
+
+if not oracon_cti.db:
+    sys.exit(0)
+if not oracon_oems.db:
+    sys.exit(0)
+
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print 'START TIME:',tme
+
+so_name = {}
+oraqrysql = "select name,id from oems_mapping where type='OPERATOR' and name is not null and rank > 0"
+rs = oracon_oems.execall(oraqrysql)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+       so_name[a_row[0]] = a_row[1]
+
+fdsql = "select callin_history_id,coss_id,to_char(so) so,coss_status,subsid,oems_flag,to_char(bookdate,'yyyy-mm-dd hh24:mi:ss') bookdate,ext_oems_id from cti010 where (coss_status is null or coss_status not in ('CLOSE','CANCEL')) and coss_id is not null and coss_id<>'-1' and so is not null and subsid is not null and calltypelv3 not like '%%行銷推廣%%' and create_date>=sysdate-60"
+rs = oracon_cti.execall(fdsql)
+if rs != None and len(rs) > 0:
+    for a_row in rs:
+      try:
+          callin_history_id = int(a_row[0])
+          wkno = a_row[1]
+          so = a_row[2]
+          coss_status = a_row[3]
+          subsid = int(a_row[4])
+          oems_flag = int(a_row[5])
+          orig_booking = a_row[6]
+          if coss_status is None:
+              coss_status = ''
+          ext_oems_id = a_row[7]
+          if ext_oems_id is None:
+              ext_oems_id = 0
+          ext_oems_id = int(ext_oems_id)
+          print 'CallID:',callin_history_id,wkno,so,coss_status,subsid,oems_flag,orig_booking,ext_oems_id
+          qrysql = "select a.sheetstatus,a.finishdate,a.cleancause,a.cleanname,a.backcause,a.backcause1,convert(varchar(19),a.cleandate,20) cleandate,convert(varchar(19),a.finishtime,20) finishtime,worknum,convert(varchar(19),a.bookdate,20) bookdate,msremark,a.singlesn,convert(varchar(19),a.createtime,20) createtime from ms0301 a with (nolock),ms0300 b with (nolock) where a.companyno='%s' and a.worksheet='%s' and a.companyno=b.companyno and a.worksheet=b.worksheet" % (so, wkno)
+          print qrysql
+          cur.execute(qrysql)
+          xarr = cur.fetchone()
+          upd_flag = 0
+          cti_flag = ''
+          bc = ''
+          bc1 = ''
+          mscomment = ''
+          finish_remark = ''
+          ftime_sql = "to_date(NULL)"
+          bookdate_sql = "to_date(NULL)"
+          chg_book_cnt = 0
+          executor = ''
+          singlesn = ''
+          ctime_sql = "to_date(NULL)"
+          if xarr is None:
+              qrysql = "select worksheet,caseclose,mscomment,executor,convert(varchar(19),updatetime,20) ftime,msremark from ms0310 with (nolock) where companyno='%s' and worksheet='%s'" % (so, wkno)
+              print qrysql
+              cur.execute(qrysql)
+              xarr = cur.fetchone()
+              p_wkno = ''
+              if xarr is not None:
+                  p_wkno = xarr[0]
+                  caseclose = xarr[1]
+                  mscomment = xarr[2]
+                  executor = xarr[3]
+                  msremark = xarr[5]
+                  mscomment = msremark
+                  if executor is None:
+                      executor = ''
+                  ftime = xarr[4]
+                  if ftime is not None:
+                      ftime_sql = "to_date('%s','yyyy-mm-dd hh24:mi:ss')" % (ftime)
+                  else:
+                      ftime_sql = "to_date(NULL)"
+                  if caseclose=='Y':
+                      upd_flag = 1
+                      upd_str = 'CLOSE'
+                      cti_flag = '3'
+                  if p_wkno=='':
+                      upd_flag = 1
+                      upd_str = 'CLOSE'
+                      cti_flag = '3'
+                      msremark = '無資料'
+                      mscomment = '無資料'
+                      bc = ''
+                      bc1 = ''
+              else:
+                  upd_flag = 1
+                  upd_str = 'CLOSE'
+                  cti_flag = '3'
+                  msremark = '無資料'
+                  mscomment = '無資料'
+                  bc = ''
+                  bc1 = ''
+          else:
+              upd_str = xarr[0]
+              if upd_str[:1]=='A':
+                  upd_str = 'CANCEL'
+                  cti_flag = '3'
+              elif upd_str[:1]=='4' and xarr[1] is not None and xarr[1]!='':
+                  upd_str = 'CLOSE'
+                  cti_flag = '3'
+              elif upd_str is not None:
+                  pass
+              else:
+                  upd_str = 'CANCEL'
+                  cti_flag = '3'
+              if upd_str != coss_status:
+                  upd_flag = 1
+              mscomment = xarr[2]
+              if mscomment is not None:
+                  mscomment = string.replace(mscomment,"'","_")
+                  mscomment = string.replace(mscomment,'"',"_")
+              else:
+                  mscomment = ''
+              executor = xarr[3]
+              if executor is None:
+                  executor = ''
+              bc = xarr[4]
+              bc1 = xarr[5]
+              if bc is None:
+                  bc = ''
+              if bc1 is None:
+                  bc1 = ''
+              if bc is not None:
+                  bc = string.replace(bc,"'","_")
+                  bc = string.replace(bc,'"',"_")
+              if bc1 is not None:
+                  bc1 = string.replace(bc1,"'","_")
+                  bc1 = string.replace(bc1,'"',"_")
+              ftime = xarr[7]
+              ctime = xarr[6]
+              if ftime is not None:
+                  ftime_sql = "to_date('%s','yyyy-mm-dd hh24:mi:ss')" % (ftime)
+              else:
+                  ftime_sql = "to_date(NULL)"
+              if ctime is not None:
+                  ctime_sql = "to_date('%s','yyyy-mm-dd hh24:mi:ss')" % (ctime)
+              else:
+                  ctime_sql = "to_date(NULL)"
+              if ext_oems_id == 0:
+                  try:
+                      ext_oems_id = int(xarr[8])
+                      cf_sql = "select a.sid from oems_impact_subscrid a \
+                                inner join ( \
+                                  select sid from oems_tickets_main where sid=%d and status not in ('5029','5125') \
+                                  union \
+                                  select sid from oems_tickets_main where owner=(select owner from oems_tickets_main where sid=%d) and status not in ('5029','5125') \
+                                ) b on b.sid=a.sid \
+                                where a.companyno='%s' and a.subsid=%d and a.impact='Y' order by a.sid desc" % (ext_oems_id, ext_oems_id, so, subsid)
+                      print cf_sql
+                      ext_oems_id = ext_oems_id+90000000000
+                      cf_rs = oracon_oems.execall(cf_sql)
+                      if cf_rs != None and len(cf_rs) > 0:
+                          for cf_row in cf_rs:
+                              ext_oems_id = int(cf_row[0])+80000000000
+                              print '8W:',ext_oems_id
+                              break
+                  except:
+                      print 'except: ext_oems_id=0'
+                      wrkctime = xarr[12]
+                      cf_sql = "select a.sid from oems_impact_subscrid a \
+                                inner join oems_tickets_main b on b.sid=a.sid and b.operator=%d and b.normal_flag='Y' and b.status in (5008,5013,5018,5020) and b.close_date is null and to_date('%s','YYYY-MM-DD HH24:MI:SS') between b.impact_bg_date and b.impact_end_date \
+                                where a.companyno='%s' and a.subsid=%d and a.impact='Y' \
+                                union \
+                                select a.sid from oems_impact_subscrid a \
+                                inner join oems_tickets_main b on b.sid=a.sid and b.operator=%d and b.normal_flag='B' and b.status in (5100,5101,5102,5103,5104) and b.type='3103' and b.close_date is null and b.create_date >= sysdate-7 and b.create_date-(30/1440) <= to_date('%s','YYYY-MM-DD HH24:MI:SS') \
+                                where a.companyno='%s' and a.subsid=%d and a.impact='Y' \
+                                union \
+                                select a.sid from oems_impact_subscrid a \
+                                inner join oems_tickets_main b on b.sid=a.sid and b.operator=%d and b.normal_flag='N' and b.status in (5100,5101,5102,5103,5104) and b.close_date is null and b.create_date >= sysdate-7 and b.create_date-(30/1440) <= to_date('%s','YYYY-MM-DD HH24:MI:SS') \
+                                where a.companyno='%s' and a.subsid=%d and a.impact='Y' \
+                                order by sid desc" % (so_name[so], wrkctime, so, subsid, so_name[so], wrkctime, so, subsid, so_name[so], wrkctime, so, subsid)
+                      print cf_sql
+                      cf_rs = oracon_oems.execall(cf_sql)
+                      if cf_rs != None and len(cf_rs) > 0:
+                          for cf_row in cf_rs:
+                              ext_oems_id = int(cf_row[0])+70000000000
+                              print '7W:',ext_oems_id
+                              break
+              if ext_oems_id == 0:
+                  cf_sql = "select a.sid from oems_impact_subscrid a \
+                            inner join oems_tickets_main b on b.sid=a.sid and b.operator=%d and b.normal_flag='B' and b.status in (5100,5101,5102,5103,5104) and b.account='COSSv2' and b.type='3107' and b.subtype in (310701,310703) and b.close_date is null and b.create_date >= sysdate-7 and b.create_date <= to_date('%s','YYYY-MM-DD HH24:MI:SS') \
+                            where a.companyno='%s' and a.subsid=%d and a.impact='Y' order by a.sid desc" % (so_name[so], wrkctime, so, subsid)
+                  print cf_sql
+                  cf_rs = oracon_oems.execall(cf_sql)
+                  if cf_rs != None and len(cf_rs) > 0:
+                      for cf_row in cf_rs:
+                          ext_oems_id = int(cf_row[0])+60000000000
+                          print '6W:',ext_oems_id
+                          break
+
+              bookdate = xarr[9]
+              if bookdate is not None:
+                  bookdate_sql = "to_date('%s','yyyy-mm-dd hh24:mi:ss')" % (bookdate)
+                  upd_flag = 1
+              else:
+                  bookdate_sql = "to_date(NULL)"
+
+              finish_remark = xarr[10]
+              singlesn = xarr[11]
+              book_sql = "select chtimes from ms03011 a with (nolock) where a.companyno='%s' and a.worksheet='%s'" % (so, wkno)
+              print book_sql
+              cur.execute(book_sql)
+              book_arr = cur.fetchone()
+              if book_arr is not None:
+                  chg_book_cnt = int(book_arr[0])
+          if upd_flag==1:
+              oraupdsql = "update cti010 set coss_status='%s',reply1='%s',reply2='%s',reply3='%s',reply4='%s',finish_time=%s,ext_oems_id=%d,last_bookdate=%s,chg_bookdate=%d,scantime=sysdate,worker='%s',singlesn='%s',clean_time=%s where callin_history_id='%d'" % (upd_str, mscomment, bc, bc1, finish_remark, ftime_sql, ext_oems_id, bookdate_sql, chg_book_cnt, executor, singlesn, ctime_sql, callin_history_id)
+              print oraupdsql
+              oracon_cti.execone(oraupdsql)
+              oracon_cti.commit()
+      except Exception, msg:
+          print msg
+          sys.stdout.flush()
+          continue
+
+if oracon_cti is not None:
+    oracon_cti.se_close()
+if oracon_oems is not None:
+    oracon_oems.se_close()
+con.close()
+
+tme = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print 'END TIME:',tme

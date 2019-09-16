@@ -1,0 +1,396 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+# 2015/03/01停止IVR通知
+# 2015/04/01停止SMS通知(TFM,YMS,NTY)
+# 2015/05/01停止SMS通知(全區)
+import os,sys,time,re
+import cossdb,pymssql
+from oraclass import ORA
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+
+if len(sys.argv) != 2:
+    print 'usage:',sys.argv[0],'[TFM|KBRO|CG]'
+    sys.exit(0)
+else:
+    so = sys.argv[1].upper()
+
+if so == 'CG':
+    sosql = "'106'"
+    db_host = 'CossMS_CG'
+elif so == 'TFM':
+    sosql = "'101','103','104','300','701'"
+    db_host = 'TFMCossMS'
+elif so == 'KBRO':
+    sosql = "'210','220','230','240','250','260','310','330','410','420','610','810','820'"
+    db_host = 'kbroCossMS'
+else:
+    print 'usage:',sys.argv[0],'[TFM|KBRO|CG]'
+    sys.exit(0)
+
+if db_host == 'TFMCossMS':
+    oracoss = ORA('coss@cnis')
+    if not oracoss.db:
+        print 'Error: Unable to connect to [COSS@CNIS]'
+        sys.exit(0)
+else:
+    oracoss = ORA('coss@kbro_nmsdb')
+    if not oracoss.db:
+        print 'Error: Unable to connect to [COSS@KBRO_NMSDB]'
+        sys.exit(0)
+
+
+nowtime = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s] START" % (nowtime)
+
+ora = ORA('nms@cnis')
+if not ora.db:
+    print 'Error: Unable to connect to [NMS@CNIS]'
+    sys.exit(0)
+
+so_info = {}
+so_name = {}
+so_print = {}
+so_sender = {}
+
+SQL = "select companyno,fullname,soname,printname,email_sender from so"
+print SQL
+rst = ora.execall(SQL)
+if rst is not None and len(rst) > 0:
+    for aw in rst:
+        try:
+            so_info[aw[0]] = aw[1]
+            so_name[aw[0]] = aw[2]
+            so_print[aw[0]] = aw[3]
+            so_sender[aw[0]] = aw[4]
+        except Exception, msg:
+            print 'Except:',str(msg)
+
+ora.se_close()
+
+if len(so_info) == 0:
+    print 'Error: SO is empty [CNIS]'
+    sys.exit(0)
+
+
+# Update status from EMAIL, SMS, IVR BEGIN
+updSQL = "update invoice_status set email_status='SKIP',email_updtime=sysdate where (email_status='YES' or email_status is null) and email is null and so in (%s)" % (sosql)
+print updSQL
+sys.stdout.flush()
+try:
+    oracoss.execone(updSQL)
+    oracoss.commit()
+except Exception, msg:
+    print 'Except:',str(msg)
+
+updSQL = "update invoice_status set sms_status='SKIP',sms_updtime=sysdate where (sms_status='YES' or (email_status in ('SKIP','FAIL') and sms_status is null)) and mobile is null and so in (%s)" % (sosql)
+print updSQL
+sys.stdout.flush()
+try:
+    oracoss.execone(updSQL)
+    oracoss.commit()
+except Exception, msg:
+    print 'Except:',str(msg)
+
+updSQL = "update invoice_status set ivr_status='SKIP',ivr_updtime=sysdate where (ivr_status='YES' or (sms_status in ('SKIP','FAIL') and ivr_status is null)) and tele is null and so in (%s)" % (sosql)
+print updSQL
+sys.stdout.flush()
+try:
+    oracoss.execone(updSQL)
+    oracoss.commit()
+except Exception, msg:
+    print 'Except:',str(msg)
+
+if so != 'CG':
+    qrySQL = "begin proc_upd_invoice_status; end;"
+    print qrySQL
+    sys.stdout.flush()
+    oracoss.execone(qrySQL)
+    oracoss.commit()
+# Update status from EMAIL, SMS, IVR END
+
+# Send to EMAIL BEGIN
+oramail = ORA('coss@kbro_nmsdb')
+if not oramail.db:
+    print 'Error: Unable to connect to [COSS@KBRO_NMSDB]'
+    sys.exit(0)
+
+qrySQL = "select sid,so,acc_so,subsid,invoice,email,inv_amount,inv_date,subsname from invoice_status where (email_status='YES' or email_status is null) and so in (%s)" % (sosql)
+print qrySQL
+sys.stdout.flush()
+o_rs = oracoss.execall(qrySQL)
+if o_rs != None and len(o_rs) > 0:
+    commit_loop = 0
+    for o_row in o_rs:
+        p_sid = int(o_row[0])
+        p_so = o_row[1]
+        p_acc_so = o_row[2]
+        p_subsid = int(o_row[3])
+        p_invoice = o_row[4]
+        p_email = o_row[5]
+        try:
+            p_invamt = int(o_row[6])
+        except:
+            p_invamt = 0
+        p_invdate = o_row[7]
+        p_subsname = o_row[8]
+
+        updSQL = ''
+        if p_email is None or p_email[:4]=='000@' or '@' not in p_email or '@tfm' in p_email or '@kbronet' in p_email or re.match(r"^.{2,}@[^.]{2,}\.[^.]{2,}", p_email) is None:
+            updSQL = "update invoice_status set email_status='SKIP',email_updtime=sysdate where sid=%d" % (p_sid)
+        elif p_email is not None and len(p_email) > 0:
+            insSQL = "insert into oss_mail_invoice (sender,target,subject,so,subsid,invoice,invamt,invdate,soname,acct_so,msg) values ('%s','%s','%s電子發票開立通知','%s',%d,'%s',%d,to_date('%s','yyyy-mm-dd hh24:mi:ss'),'%s','%s','%s')" % (so_sender[p_so],p_email,so_info[p_acc_so],p_so,p_subsid,p_invoice,p_invamt,p_invdate,so_name[p_acc_so],p_acc_so,p_subsname)
+            print insSQL
+            try:
+                oramail.execone(insSQL)
+                updSQL = "update invoice_status set email_status='SENT',email_updtime=sysdate where sid=%d" % (p_sid)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        if updSQL!='':
+            print updSQL
+            try:
+                oracoss.execone(updSQL)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        commit_loop = commit_loop+1
+        if (commit_loop%30)==0:
+            oramail.commit()
+            oracoss.commit()
+        sys.stdout.flush()
+    oramail.commit()
+    oracoss.commit()
+
+oramail.se_close()
+# Send to EMAIL END
+
+# Send to SMS BEGIN
+qrySQL = "select sid,so,acc_so,subsid,invoice,mobile,inv_amount,to_char(inv_date,'yyyy/mm/dd') invdate,sms_status from invoice_status where (sms_status='YES' or (email_status in ('SKIP','FAIL') and sms_status is null)) and so in (%s)" % (sosql)
+print qrySQL
+sys.stdout.flush()
+o_rs = oracoss.execall(qrySQL)
+if o_rs != None and len(o_rs) > 0:
+    commit_loop = 0
+    for o_row in o_rs:
+        p_sid = int(o_row[0])
+        p_so = o_row[1]
+        p_acc_so = o_row[2]
+        p_subsid = int(o_row[3])
+        if p_subsid>=1000:
+            cust_no = '%04s' % (str(p_subsid)[:4])
+        else:
+            cust_no = '%04d' % (p_subsid)
+        p_invoice = o_row[4]
+        p_mobile = p_sms = None
+        if o_row[5] is not None:
+            p_mobile = o_row[5].split(",")[0]
+        p_amount = int(o_row[6])
+        p_invdate = o_row[7]
+        if o_row[8] is not None and len(o_row[8]) > 0:
+            p_sms = o_row[8]
+
+        if p_acc_so in ['101','103','104','300','701','500']:
+            sms_msg = "貴訂戶編號%d發票號碼%s日期%s金額%s個人識別碼%s請至公司網站查詢，%s敬上" % (p_subsid,p_invoice,p_invdate,p_amount,cust_no,so_print[p_acc_so])
+        elif p_acc_so=='240':
+            sms_msg = "貴戶有線電視繳費已收到，發票號碼%s日期%s金額%s訂戶編號%d請至公司網站查詢，%s上" % (p_invoice,p_invdate,p_amount,p_subsid,so_print[p_acc_so])
+        elif p_acc_so=='250':
+            sms_msg = "貴戶有線電視繳費已收到，發票號碼%s日期%s金額%s訂編%d請至公司網站查詢，全聯有線電視上" % (p_invoice,p_invdate,p_amount,p_subsid)
+        elif p_acc_so=='310':
+            sms_msg = "貴戶有線電視繳費已收到，發票號碼%s日期%s金額%s訂戶編號%d請至公司網站查詢，%s上" % (p_invoice,p_invdate,p_amount,p_subsid,so_print[p_acc_so])
+        elif p_acc_so=='026':
+            sms_msg = "貴戶寬頻上網繳費已收到，發票號碼%s日期%s金額%s訂戶編號%d請至公司網站查詢，凱擘敬上" % (p_invoice,p_invdate,p_amount,p_subsid)
+        elif p_acc_so=='106':
+            sms_msg = "貴戶繳費已收到，發票號碼%s日期%s金額%s訂戶編號%d請至公司網站查詢，%s敬上" % (p_invoice,p_invdate,p_amount,p_subsid,so_print[p_acc_so])
+        else:
+            sms_msg = "貴戶有線電視繳費已收到，發票號碼%s日期%s金額%s訂戶編號%d請至公司網站查詢，%s敬上" % (p_invoice,p_invdate,p_amount,p_subsid,so_print[p_acc_so])
+
+        updSQL = ''
+        if p_mobile is None or p_mobile=='' or p_sms is None or p_sms == '':
+            updSQL = "update invoice_status set sms_status='SKIP',sms_updtime=sysdate where sid=%d" % (p_sid)
+        elif p_mobile is not None:
+            insSQL = "insert into oss_sms_invoice (sys,target,msg,so,subsid,invoice,booking_sendtime,acctso) values ('SYS_INV','%s','%s','%s',%d,'%s',sysdate,'%s')" % (p_mobile, sms_msg, p_so, p_subsid, p_invoice, p_acc_so)
+            print insSQL
+            try:
+                oracoss.execone(insSQL)
+                updSQL = "update invoice_status set sms_status='SENT',sms_updtime=sysdate where sid=%d" % (p_sid)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        if updSQL!='':
+            print updSQL
+            try:
+                oracoss.execone(updSQL)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        commit_loop = commit_loop+1
+        if (commit_loop%30)==0:
+            oracoss.commit()
+        sys.stdout.flush()
+    oracoss.commit()
+# Send to SMS END
+
+# Send to IVR BEGIN
+oracti = ORA('icare@cti')
+if not oracti.db:
+    print 'Error: Unable to connect to [ICARE@CTI]'
+    sys.exit(0)
+
+qrySQL = "select sid,so,acc_so,subsid,invoice,tele,ivr_status from invoice_status where (ivr_status='YES' or (sms_status in ('SKIP','FAIL') and ivr_status is null)) and so in (%s)" % (sosql)
+print qrySQL
+sys.stdout.flush()
+o_rs = oracoss.execall(qrySQL)
+if o_rs != None and len(o_rs) > 0:
+    commit_loop = 0
+    for o_row in o_rs:
+        p_sid = int(o_row[0])
+        p_so = o_row[1]
+        p_acc_so = o_row[2]
+        p_subsid = int(o_row[3])
+        p_invoice = o_row[4]
+        p_tel = p_ivr = None
+        if o_row[5] is not None and len(o_row[5]) > 0:
+            p_tel = o_row[5]
+        if o_row[6] is not None and len(o_row[6]) > 0:
+            p_ivr = o_row[6]
+
+        if p_so in ['101','103','104','300','701','500']:
+            p_flowtype = 'I002'
+        else:
+            p_flowtype = 'I001'
+
+        updSQL = ''
+        if p_tel is None or p_tel == '' or p_ivr is None or p_ivr == '':
+            updSQL = "update invoice_status set ivr_status='SKIP',ivr_updtime=sysdate where sid=%d" % (p_sid)
+        elif p_tel is not None:
+            seqSQL = "select custlist_seq.nextval from dual"
+            print seqSQL
+            try:
+                s_rs = oracti.execall(seqSQL)
+                p_seq = -1
+                for s_row in s_rs:
+                    p_seq = int(s_row[0])
+                if p_seq>0:
+                    insFirstSQL = "insert into custlist (sid,customer_id,name,tel,rands,status,redialcnt,flowtype,flowid,so_id,createname,flowsource,outbound_type,worksheet,servicename,acct_so) values (%d,%d,'%s','%s','%s','-1',0,'%s','001','%s','E_INV','OUT','1','%s','1 CATV','%s')" % (p_seq, p_subsid, p_invoice, p_tel, p_tel, p_flowtype, p_so, p_invoice, p_acc_so)
+                    insSecondSQL = "insert into custlist_rands (sid,rands,status,createdate) values (%d,'%s','-1',sysdate)" % (p_seq, p_tel)
+                    print insFirstSQL
+                    print insSecondSQL
+                    try:
+                        oracti.execone(insFirstSQL)
+                        oracti.execone(insSecondSQL)
+                        updSQL = "update invoice_status set ivr_status='SENT',ivr_updtime=sysdate where sid=%d" % (p_sid)
+                    except Exception, msg:
+                        print 'Except:',str(msg)
+                else:
+                    print 'Except: IVR SID create fail %s' % (p_invoice)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        if updSQL!='':
+            print updSQL
+            try:
+                oracoss.execone(updSQL)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        commit_loop = commit_loop+1
+        if (commit_loop%30)==0:
+            oracoss.commit()
+            oracti.commit()
+        sys.stdout.flush()
+    oracoss.commit()
+    oracti.commit()
+
+oracti.se_close()
+# Send to IVR END
+
+# Send to COSS BEGIN
+try:
+    if so == 'CG':
+      con = pymssql.connect(host=db_host,user=cossdb.account,password=cossdb.passwd,database='cossdb_cg')
+    else:
+      con = pymssql.connect(host=db_host,user=cossdb.account,password=cossdb.passwd,database='cossdb')
+    cur = con.cursor()
+except Exception, msg:
+    print 'Error: Unable to connect to ['+db_host+']'
+    sys.exit(0)
+
+qrySQL = "select sid,so,subsid,invoice,email_status,sms_status,ivr_status,to_char(email_sendtime,'yyyy-mm-dd hh24:mi:ss') emailtime,to_char(sms_sendtime,'yyyy-mm-dd hh24:mi:ss') smstime,to_char(ivr_sendtime,'yyyy-mm-dd hh24:mi:ss') ivrtime from invoice_status where coss_flag='N' and (coss_updtime is null or coss_updtime<sysdate-0.5) and createtime > to_date('2017/12/01','YYYY/MM/DD') and so in (%s) " % (sosql)
+print qrySQL
+sys.stdout.flush()
+o_rs = oracoss.execall(qrySQL)
+if o_rs != None and len(o_rs) > 0:
+    commit_loop = 0
+    for o_row in o_rs:
+        p_sid = int(o_row[0])
+        p_so = o_row[1]
+        p_subsid = int(o_row[2])
+        p_invoice = o_row[3]
+        p_email = o_row[4]
+        p_sms = o_row[5]
+        p_ivr = o_row[6]
+        p_emailtime = o_row[7]
+        p_smstime = o_row[8]
+        p_ivrtime = o_row[9]
+
+        nowtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        if p_emailtime is None or p_emailtime=='':
+            p_emailtime = nowtime
+        if p_smstime is None or p_smstime=='':
+            p_smstime = nowtime
+        if p_ivrtime is None or p_ivrtime=='':
+            p_ivrtime = nowtime
+
+        mSQL = updSQL = ''
+        if (p_email=='NO' and p_sms=='NO' and p_ivr=='NO') or (p_email=='SKIP' and p_sms=='SKIP' and p_ivr=='SKIP'):
+            mSQL = "update ms4000 set invtextpath='不通知',invtexttime='%s' where companyno='%s' and subsid=%d and invoice='%s'" % (nowtime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='不通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email in ['SKIP','FAIL','NO'] and p_sms in ['SKIP','FAIL','NO'] and p_ivr in ['SKIP','FAIL','NO']:
+            mSQL = "update ms4000 set invtextpath='通知失敗',invtexttime='%s' where companyno='%s' and subsid=%d and invoice='%s'" % (nowtime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='通知失敗',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email=='OK' and p_sms=='OK' and p_ivr=='OK':
+            mSQL = "update ms4000 set invtextpath='完成EMAIL&簡訊&電話語音通知',invtexttime='%s',invtextyn='Y' where companyno='%s' and subsid=%d and invoice='%s'" % (p_ivrtime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='完成EMAIL&簡訊&電話語音通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email=='OK' and p_sms=='OK' and p_ivr in ['SKIP','FAIL','NO']:
+            mSQL = "update ms4000 set invtextpath='完成EMAIL&簡訊通知',invtexttime='%s',invtextyn='Y' where companyno='%s' and subsid=%d and invoice='%s'" % (p_smstime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='完成EMAIL&簡訊通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email=='OK' and p_sms in ['SKIP','FAIL','NO'] and p_ivr=='OK':
+            mSQL = "update ms4000 set invtextpath='完成EMAIL&電話語音通知',invtexttime='%s',invtextyn='Y' where companyno='%s' and subsid=%d and invoice='%s'" % (p_ivrtime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='完成EMAIL&電話語音通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email in ['SKIP','FAIL','NO'] and p_sms=='OK' and p_ivr=='OK':
+            mSQL = "update ms4000 set invtextpath='完成簡訊&電話語音通知',invtexttime='%s',invtextyn='Y' where companyno='%s' and subsid=%d and invoice='%s'" % (p_ivrtime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='完成簡訊&電話語音通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email=='OK' and p_sms in ['SKIP','FAIL','NO'] and p_ivr in ['SKIP','FAIL','NO']:
+            mSQL = "update ms4000 set invtextpath='完成EMAIL通知',invtexttime='%s',invtextyn='Y' where companyno='%s' and subsid=%d and invoice='%s'" % (p_emailtime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='完成EMAIL通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email in ['SKIP','FAIL','NO'] and p_sms=='OK' and p_ivr in ['SKIP','FAIL','NO']:
+            mSQL = "update ms4000 set invtextpath='完成簡訊通知',invtexttime='%s',invtextyn='Y' where companyno='%s' and subsid=%d and invoice='%s'" % (p_smstime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='完成簡訊通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        elif p_email in ['SKIP','FAIL','NO'] and p_sms in ['SKIP','FAIL','NO'] and p_ivr=='OK':
+            mSQL = "update ms4000 set invtextpath='完成電話語音通知',invtexttime='%s',invtextyn='Y' where companyno='%s' and subsid=%d and invoice='%s'" % (p_ivrtime, p_so, p_subsid, p_invoice)
+            updSQL = "update invoice_status set coss_status='完成電話語音通知',coss_updtime=sysdate,coss_flag='Y' where sid=%d" % (p_sid)
+        if mSQL!='':
+            print mSQL
+            try:
+                cur.execute(mSQL)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        if updSQL!='':
+            print updSQL
+            try:
+                oracoss.execone(updSQL)
+            except Exception, msg:
+                print 'Except:',str(msg)
+        commit_loop = commit_loop+1
+        if (commit_loop%30)==0:
+            con.commit()
+            oracoss.commit()
+        sys.stdout.flush()
+    con.commit()
+    oracoss.commit()
+# Send to COSS END
+
+con.close()
+oracoss.se_close()
+
+nowtime = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print "[%s] END" % (nowtime)

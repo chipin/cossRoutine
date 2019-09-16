@@ -1,0 +1,143 @@
+<?
+  header("Content-Type: text/html; charset=big5");
+  
+  require_once 'conn_db.inc.php';
+  require_once("web_get.php");
+  
+  function dta_function()
+  {
+  }
+  
+  $query_str = $_SERVER['QUERY_STRING'];
+  
+  function logf($s)
+  {
+    global $query_str;
+    $tmestr = date('Y/m/d H:i:s');
+    $dir = date('Ym');
+    $hostip = getenv("REMOTE_ADDR");
+    $outf = fopen('../../log/dta/dta_pre_active_'.$dir.'.log','at');
+    fprintf($outf, "[%s,%s,%s] --> %s\n", $tmestr, $hostip, $query_str, $s);
+    fclose($outf);
+  }
+  
+  function exit_message($s)
+  {
+    logf($s);
+    die($s.chr(10));
+  }
+
+  if(count($argv)<2)
+    exit_message('[E00]: Parameters');
+  $p_so = $argv[1];
+  if(empty($p_so))
+    exit_message('[E01]: Parameter - so');
+
+  if($p_so == '106')
+  {
+    $cossdbh = new CONN_DB("CossMS_CG");
+    $SQL = "select singlesn,nuid from mi0130 with (nolock) where companyno='".$p_so."' and placeno='開通準備倉' and singlesn is not null";
+  }
+  else if (!preg_match("/^(101|103|104|300|701|500)$/i", $p_so))
+  {
+    $cossdbh = new CONN_DB("kbroCossMS");
+    $SQL = "select singlesn,nuid from mi0130 with (nolock) where companyno='".$p_so."' and placeno='開通準備倉' and singlesn is not null";
+  }
+  else
+  {
+    $cossdbh = new CONN_DB('TWM_NWIS');
+    $SQL = "select singlesn,nuid_barcode nuid from v_ivrmi0130 where companyno='".$p_so."' and nuid_barcode is not null and mtkind='STB' and instore='N'";
+  }
+  
+  $ora_dbh = new CONN_DB("SCNIS_COSS");
+  
+  $stbno_list = array();
+  $nuid_list = array();
+  $cossdbh->query_all($SQL);
+  foreach($cossdbh->Record as $row)
+  {
+    $p_stbno = $row['SINGLESN'];
+    if(empty($p_stbno))
+      $p_stbno = $row['singlesn'];
+    
+    /*  
+    if(!empty($p_stbno))
+    {
+      $SQL = "update ca_dta set ready='Y' where stbno='".$p_stbno."'";
+      $ora_dbh->execute($SQL);
+    }
+    */
+    
+    $p_nuid = $row['NUID'];
+    if(empty($p_nuid))
+      $p_nuid = $row['nuid'];
+    $stbno_list[] = $p_stbno;
+    $nuid_list[$p_stbno] = $p_nuid;
+  }
+  $cossdbh->close();
+
+  $SQL = "select stbno,iccno,mi from ca_dta";
+  $dta_list = array();
+  $iccno_list = array();
+  $ora_dbh->query_all($SQL);
+  foreach($ora_dbh->Record as $row)
+  {
+    $dta_list[] = $row['STBNO'];
+    $iccno_list[$row['STBNO']] = $row['ICCNO'];
+    $mi = $row['MI'];
+    if($mi=='N')
+    {
+    	$stbno_list[] = $row['STBNO'];
+    }
+  }
+  
+  $ext_list = array_diff($stbno_list, $dta_list);
+  if(!empty($ext_list))
+  {
+    foreach($ext_list as $el)
+    {
+      if(!empty($el))
+      {
+        $tmp_nuid = $nuid_list[$el];
+        $SQL = "insert into ca_dta(stbno,nuid,so) values('$el','$tmp_nuid','$p_so')";
+        print $SQL.chr(10);
+        $ora_dbh->execute($SQL);
+      }
+    }
+    $ora_dbh->commit();
+  }
+  
+  $SQL = "select stbno from ca_dta where provtime is not null and iccno is not null";
+  $dta_list = array();
+  $ora_dbh->query_all($SQL);
+  foreach($ora_dbh->Record as $row)
+  {
+    $dta_list[] = $row['STBNO'];
+  }
+  $ext_list = array_diff($stbno_list, $dta_list);
+  if(!empty($ext_list))
+  {
+    foreach($ext_list as $el)
+    {
+      if(empty($el))
+        continue;
+      $tmp_iccno = $iccno_list[$el];
+      $query_str = 'so='.$p_so.'&stbno='.$el.'&func=PRE_ACT&account=PRE_ACTIVE';
+      print $query_str.chr(10);
+      $result_str = web_service_get("http://192.168.50.72/GW/dtv/dta_prov.php?".$query_str, "");
+      if($result_str=='OK')
+      {
+        $SQL = "update ca_dta set provtime=sysdate where stbno='".$el."'";
+        print $SQL.chr(10);
+        $ora_dbh->execute($SQL);
+      }
+      else
+        print $result_str;
+    }
+  }
+  
+  $ora_dbh->close();
+
+  exit_message('Job done.');
+
+?>

@@ -1,0 +1,221 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+import os,sys,time
+import MySQLdb
+from oraclass import ORA
+from pysnmpclass import snmpclass
+
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+# etherStatsCRCAlignErrors 1.3.6.1.2.1.16.1.1.1.8
+# jnxCosQstatTailDropPkts  1.3.6.1.4.1.2636.3.15.4.1.11
+#   Queue number:         Mapped forwarding classes
+#     0                   best-effort
+#     1                   assured-forwarding
+#     2                   Return-in (VOD)
+#     3                   DCN-in
+#     4                   OA-in
+#     5                   SO-in
+#     6                   DTV-in
+#     7                   network-control
+
+
+
+
+oracnis = ORA('nms@cnis')
+if not oracnis.db:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] Error: Unable to connect to server [CNIS]'
+    sys.exit(0)
+
+snmp_oid = {}
+SQL = "select name,oid from snmp_mib where name in ('etherStatsCRCAlignErrors','jnxCosQstatTailDropPkts')"
+rst = oracnis.execall(SQL)
+if rst is not None and len(rst)>0:
+    for aw in rst:
+        try:
+            xname = aw[0]
+            xoid = aw[1]
+            snmp_oid[xname] = xoid
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print '['+nowdate+'] Except: SNMP_MIB '+str(msg)
+if len(snmp_oid) == 0:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] Error: SNMP_MIB is empty [CNIS]'
+    if oracnis is not None:
+        oracnis.se_close()
+    sys.exit(0)
+
+cdn = {}
+cdn_cnt = 0
+SQL = "select a.companyno,a.ne_id,a.ifindex,b.ip,b.snmp_ro,c.maker,c.model,b.type,a.alarm_type \
+from ipif_kpi a \
+inner join ip_ne b on b.companyno=a.companyno and b.ne_id = a.ne_id and b.stopyn='N' \
+inner join sys_object c on c.ne_id=substr(a.ne_id,-8,4) and c.stopyn='N' and upper(c.maker)='JUNIPER' \
+where a.alarm_type = 'CDN 電路' order by a.companyno,a.ne_id,a.ifindex"
+print SQL
+rst = oracnis.execall(SQL)
+if rst is not None and len(rst) > 0:
+    for aw in rst:
+        try:
+            so = aw[0]
+            neid = aw[1]
+            ifidx = int(aw[2])
+            ip = aw[3]
+            snmp = aw[4]
+
+            cdn['SO-'+str(cdn_cnt)] = so
+            cdn['NEID-'+str(cdn_cnt)] = neid
+            cdn['IDX-'+str(cdn_cnt)] = ifidx
+            cdn['IP-'+str(cdn_cnt)] = ip
+            cdn['SNMP-'+str(cdn_cnt)] = snmp
+            cdn_cnt = cdn_cnt+1
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print '['+nowdate+'] Except: CDN '+str(msg)
+if len(cdn) == 0:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] Error: CDN is empty [CNIS]'
+    if oracnis is not None:
+        oracnis.se_close()
+    sys.exit(0)
+
+try:
+    mydb = MySQLdb.connect(host="TFM-QOS", user="root", passwd="newom123", db="cmdb_500")
+    mydbcur = mydb.cursor()
+except Exception, msg:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] Error: Unable to connect to server [MYSQL]'
+    sys.exit(0)
+
+sys.stdout.flush()
+
+duration = 60*5
+oracnis_retry = mydb_retry = 0
+startime = time.time()
+
+while 1:
+    try:
+        oracnis.execone('select sysdate from dual')
+        oracnis_retry = 0
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] Error: Lost connection to [CNIS], trying to reconnect. '+str(msg)
+        oracnis_retry = oracnis_retry + 1
+        oracnis = ORA('nms@cnis')
+        if not oracnis.db:
+            if oracnis_retry >= 10:
+                print '['+nowdate+'] Error: Lost connection to [CNIS], fail to retry [EXIT]'
+                break
+            else:
+                print '['+nowdate+'] Error: Unable to reconnect to server [CNIS]',oracnis_retry
+                sys.stdout.flush()
+                time.sleep(300)
+                continue
+
+    try:
+        mydb.ping()
+        mydb_retry = 0
+    except Exception, msg:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '['+nowdate+'] Error: Lost connection to [MYSQL], trying to reconnect. '+str(msg)
+        mydb_retry = mydb_retry + 1
+        try:
+            mydb = MySQLdb.connect(host="TFM-QOS", user="root", passwd="newom123", db="cmdb_500")
+            mydbcur = mydb.cursor()
+        except Exception, msg:
+            if mydb_retry >= 10:
+                print '['+nowdate+'] Error: Lost connection to [MYSQL], fail to retry [EXIT]'
+                break
+            else:
+                print '['+nowdate+'] Error: Unable to reconnect to server [MYSQL]',mydb_retry
+                sys.stdout.flush()
+                time.sleep(300)
+                continue
+
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] START'
+
+    i = 0
+    while i < cdn_cnt:
+        try:
+            so = cdn['SO-'+str(i)]
+            neid = cdn['NEID-'+str(i)]
+            idx = cdn['IDX-'+str(i)]
+            ip = cdn['IP-'+str(i)]
+            snmp = cdn['SNMP-'+str(i)]
+            print i,so,neid,idx,ip,snmp
+
+            crc_error = droppkt_vod = droppkt_dtv = 'null'
+            agt = snmpclass(version='v2c',community=snmp,ptimeout=1,pretries=3,debug=0)
+
+            try:
+                mib = "%s.%d" % (snmp_oid['etherStatsCRCAlignErrors'], idx)
+                rets = agt.snmpget([ip, '-c', snmp, mib])
+                print rets
+                if rets is not None and rets[0][1] is not None and rets[0][1]!='':
+                    crc_error = int(rets[0][1])
+            except:
+                pass
+
+            try:
+                mib = "%s.%d.2" % (snmp_oid['jnxCosQstatTailDropPkts'], idx)
+                rets = agt.snmpget([ip, '-c', snmp, mib])
+                print rets
+                if rets is not None and rets[0][1] is not None and rets[0][1]!='':
+                    droppkt_vod = int(rets[0][1])
+            except:
+                pass
+
+            try:
+                mib = "%s.%d.6" % (snmp_oid['jnxCosQstatTailDropPkts'], idx)
+                rets = agt.snmpget([ip, '-c', snmp, mib])
+                print rets
+                if rets is not None and rets[0][1] is not None and rets[0][1]!='':
+                    droppkt_dtv = int(rets[0][1])
+            except:
+                pass
+
+            sid = (int)((time.time()/300)%57600)
+            nowdate = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+            SQL = "replace into cdn_qos (sid,ne_id,ifidx,updatetime,crc_error,droppkt_vod,droppkt_dtv) values (%d,'%s',%d,'%s',%s,%s,%s)" % (sid,neid,idx,nowdate,crc_error,droppkt_vod,droppkt_dtv)
+            if crc_error != 'null' or droppkt_vod != 'null' or droppkt_dtv != 'null':
+                print i,SQL,'=> EXEC'
+                try:
+                    mydbcur.execute(SQL)
+                    mydb.commit()
+                    #pass
+                except Exception, msg:
+                    print '['+nowdate+'] Except: '+str(i)+' '+str(msg)
+            else:
+                print i,SQL,'=> PASS'
+        except Exception, msg:
+            nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+            print '['+nowdate+'] Except: '+str(i)+' '+str(msg)
+        sys.stdout.flush()
+        i = i+1
+
+    endtime = time.time()
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print "[%s] END (totalsec: %d)\n" % (nowdate, endtime-startime)
+    sys.stdout.flush()
+
+    while (endtime-startime) < duration:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print "[%s] WAIT 10 seconds %d %d %d (%d)" % (nowdate, endtime, startime, endtime-startime, duration)
+        sys.stdout.flush()
+        time.sleep(10)
+        endtime = time.time()
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    startime = time.time()
+    print "[%s] NEXT" % (nowdate)
+    print ""
+
+if oracnis:
+    oracnis.se_close()
+if mydb:
+    mydb.close()
+sys.exit(0)

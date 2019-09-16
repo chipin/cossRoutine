@@ -1,0 +1,645 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+import os,sys,time
+import re,threading
+from telnetlib import Telnet
+import DCOracle2
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+if len(sys.argv) != 2:
+    print 'usage:',sys.argv[0],'CompanyNo|AreaNo'
+    sys.exit(0)
+
+so = sys.argv[1].upper()
+if so != 'TFM' and so != 'TFM1' and so != 'TFM2' and so != 'KBRO' and so != 'KBRO1' and so != 'KBRO2' and so != 'KBRO3' and so != 'KBRO4' and so != 'KBRO5' and re.match(r"^\d{3}$", so) is None:
+    print 'usage:',sys.argv[0],'CompanyNo|AreaNo'
+    sys.exit(0)
+
+
+def logf(xso, xcmts_id, xcontent):
+    xday = time.strftime("%Y%m%d", time.localtime())
+    xnow = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    xcont = "%s %s : %s" % (xnow, xcmts_id, xcontent)
+    print xcont
+
+    try:
+        xf = "/ap/home/coss/log/cmts/telnet-%s-%s-%s.log" % (xso, xcmts_id, xday)
+        fp = open(xf,"a+")
+        fp.write(xcont + "\n")
+        fp.close()
+    except Exception, msg:
+        print "%s %s : Except Writelog - %s" % (xnow, xcmts_id, msg)
+
+
+def query_cmts(*data1):
+    global oraC, oraO, kpi_offline1, kpi_offline2, so_name, run_count
+    alldata = ''
+    alldata_arr = []
+    cm_status = {}
+    alarm_node = {}
+    alarm_sid = {}
+    this_alarm = {}
+
+    data2 = dict(data1)
+
+    try:
+        curC2 = oraC.cursor()
+    except Exception, msg:
+        logstr = 'Except cursor [CNIS] - %s' % (msg)
+        logf(data2['companyno'], data2['cmts_id'], logstr)
+        return
+
+    try:
+        curO2 = oraO.cursor()
+    except Exception, msg:
+        logstr = 'Except cursor [CNIS] - %s' % (msg)
+        logf(data2['companyno'], data2['cmts_id'], logstr)
+        return
+
+    logf(data2['companyno'], data2['cmts_id'], 'START')
+    logf(data2['companyno'], data2['cmts_id'], data2)
+
+    if (data2['type'].find('UBR') > -1):
+        try:
+            tn = Telnet()
+            tn.open(data2['ip'], 23)
+	    
+            if data2['account'] is not None:
+                tn.read_until('Username:', 10)
+                tn.write('cnisnms'+ "\n")
+            tn.read_until('Password:', 10)
+            tn.write('IT1111' + "\n")
+            #tn.read_until('>', 10)
+            #tn.write('en' + "\n")
+            #tn.read_until('Password:', 10)
+            #tn.write(data2['enpasswd'] + "\n")
+            tn.read_until('#', 10)
+
+            tn.write("terminal length 0\n")
+            tn.read_until('#', 10)
+
+            tn.write("show cable modem registered | include online\n")
+
+            tn.write("exit\n")
+            alldata = tn.read_all()
+            tn.close()
+        except Exception, msg:
+            logstr = 'Except Telnet - %s' % (msg)
+            logf(data2['companyno'], data2['cmts_id'], logstr)
+
+    elif (data2['type'].find('CASA') > -1):
+        try:
+            tn = Telnet()
+            tn.open(data2['ip'], 23)
+
+            if data2['account'] is not None:
+                tn.read_until('login:', 10)
+                tn.write(data2['account'] + "\n")
+            tn.read_until('Password:', 10)
+            tn.write(data2['passwd'] + "\n")
+            tn.read_until('>', 10)
+            tn.write('en' + "\n")
+            tn.read_until('Password:', 10)
+            tn.write(data2['enpasswd'] + "\n")
+            tn.read_until('#', 10)
+
+            tn.write("page-off\n")
+            tn.read_until('#', 10)
+
+            tn.write("show cable mode online\n")
+
+            tn.write("exit\n")
+            tn.write("exit\n")
+            alldata = tn.read_all()
+            tn.close()
+        except Exception, msg:
+            logstr = 'Except Telnet - %s' % (msg)
+            logf(data2['companyno'], data2['cmts_id'], logstr)
+    
+    elif (data2['type'].find('ARRIS') > -1):
+        try:
+            tn = Telnet()
+            tn.open(data2['ip'], 23)
+
+            if data2['account'] is not None:
+                tn.read_until('Login:', 10)
+                tn.write(data2['account'] + "\n")
+            tn.read_until('Password:', 10)
+            tn.write(data2['passwd'] + "\n")
+            tn.read_until('#', 10)
+            tn.write('en' + "\n")
+            tn.read_until('Password:', 10)
+            tn.write(data2['enpasswd'] + "\n")
+            tn.read_until('#', 10)
+
+            tn.write("terminal length 0\n")
+            tn.read_until('#', 10)
+
+            tn.write("show cable modem operational\n")
+
+            tn.write("exit\n")
+            tn.write("exit\n")
+            alldata = tn.read_all()
+            tn.close()
+        except Exception, msg:
+            logstr = 'Except Telnet - %s' % (msg)
+            logf(data2['companyno'], data2['cmts_id'], logstr)
+
+    else:
+        logf(data2['companyno'], data2['cmts_id'], 'Unknown model')
+
+    if len(alldata) > 0:
+        alldata_arr = alldata.split("\r\n")
+    if len(alldata_arr) > 0:
+        logstr = 'alldata_arr = %d' % (len(alldata_arr))
+        logf(data2['companyno'], data2['cmts_id'], logstr)
+
+        for line in alldata_arr:
+            line_arr = re.split(r"\s+", line)
+
+            try:
+                if (data2['type'].find('UBR') > -1):
+                    mac = line_arr[8].replace('.','').upper().strip()
+                elif (data2['type'].find('CASA') > -1):
+                    mac = line_arr[0].replace('.','').upper().strip()
+                elif (data2['type'].find('ARRIS') > -1):
+                    mac = line_arr[7].replace('.','').upper().strip()
+                if len(mac) != 12:
+                    mac = ''
+                else:
+                    cm_status[mac] = 1
+            except:
+                mac = ''
+    else:
+        logf(data2['companyno'], data2['cmts_id'], 'NODATA - show cable modem')
+
+    cmmac_upd = 0
+    if len(cm_status) > 0:
+        updsql = "update cmmac set prev_cm_online=case when tn_updtime >= sysdate-1/48 then cm_online else null end,prev_tn_updtime=case when tn_updtime >= sysdate-1/48 then tn_updtime else null end,cm_online=null,tn_updtime=null where companyno='%s' and cmts_id='%s'" % (data2['companyno'], data2['cmts_id'])
+        logf(data2['companyno'], data2['cmts_id'], updsql)
+        try:
+            curC2.execute(updsql)
+            oraC.commit()
+            cmmac_upd = 1
+        except:
+            logf(data2['companyno'], data2['cmts_id'], updsql)
+            logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to update CMMAC (cm_online=null)')
+
+    if cmmac_upd == 1:
+        cmmac_str = ''
+        i = 0
+
+        while 1:
+            try:
+                aa = cm_status.popitem()
+
+                if len(cmmac_str) > 0:
+                    cmmac_str = "%s,'%s'" % (cmmac_str, aa[0])
+                else:
+                    cmmac_str = "'%s'" % (aa[0])
+
+                i = i + 1
+                if i == 500:
+                    if len(cmmac_str) > 0:
+                        updsql = "update cmmac set cm_online='1',tn_updtime=sysdate where companyno='%s' and cmts_id='%s' and cmmac in (%s)" % (data2['companyno'], data2['cmts_id'], cmmac_str)
+                        logf(data2['companyno'], data2['cmts_id'], updsql)
+                        try:
+                            curC2.execute(updsql)
+                            oraC.commit()
+                            cmmac_upd = 2
+                        except:
+                            logf(data2['companyno'], data2['cmts_id'], updsql)
+                            logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to update CMMAC (cm_online=1)')
+                            break
+
+                    cmmac_str = ''
+                    i = 0
+            except:
+                if len(cmmac_str) > 0:
+                    updsql = "update cmmac set cm_online='1',tn_updtime=sysdate where companyno='%s' and cmts_id='%s' and cmmac in (%s)" % (data2['companyno'], data2['cmts_id'], cmmac_str)
+                    logf(data2['companyno'], data2['cmts_id'], updsql)
+                    try:
+                        curC2.execute(updsql)
+                        oraC.commit()
+                        cmmac_upd = 2
+                    except:
+                        logf(data2['companyno'], data2['cmts_id'], updsql)
+                        logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to update CMMAC (cm_online=1)')
+                break
+
+    if run_count <= 1:
+        cmmac_upd = 3
+
+    if cmmac_upd == 2:
+        chknum = [5,7,8,9,10,11,12]
+        for cc in chknum:
+            sql = "select substr(link,1,%d) link,count(*) link_num,sum(case when cm_online='1' then 1 else 0 end) link_online,sum(case when prev_cm_online='1' then 1 else 0 end) prev_link_online, \
+case when sum(case when prev_cm_online='1' then 1 else 0 end) > 0 then \
+round(((sum(case when prev_cm_online='1' then 1 else 0 end)-sum(case when cm_online='1' then 1 else 0 end))/sum(case when prev_cm_online='1' then 1 else 0 end))*100,0) \
+else -9999 end offline_rate,max(city),max(district) \
+from cmmac where companyno='%s' and cmts_id='%s' and subsid is not null and link is not null and link like '_____-______%%' and link != 'ZZ999-999999' \
+group by substr(link,1,%d) having count(*) >= 4 and sum(case when prev_cm_online='1' then 1 else 0 end) > sum(case when cm_online='1' then 1 else 0 end)" % (cc, data2['companyno'], data2['cmts_id'], cc)
+#and sum(case when prev_cm_online='1' then 1 else 0 end) >= 4
+#and sum(case when prev_cm_online='1' then 1 else 0 end) > sum(case when cm_online='1' then 1 else 0 end)
+            #print sql
+            logf(data2['companyno'], data2['cmts_id'], sql)
+            curC2.execute(sql)
+            rowC2 = curC2.fetchall()
+            if rowC2 is not None and len(rowC2) > 0:
+                for col in rowC2:
+                    logf(data2['companyno'], data2['cmts_id'], col)
+
+                    over = oems = 0
+                    link = col[0]
+                    node = link[0:5]
+                    total_num = int(col[1])
+                    online_num = int(col[2])
+                    prev_online = int(col[3])
+                    offline_rate = int(col[4])
+                    area = "%s-%s" % (col[5], col[6])
+
+                    if prev_online == 0 and online_num <= 3:
+                        over = 2
+                    elif prev_online > 0 and prev_online > online_num:
+                        if total_num >= 4 and total_num <= 6 and offline_rate >= kpi_offline1:
+                            over = 1
+                        elif total_num >= 7 and offline_rate >= kpi_offline2:
+                            over = 1
+
+                    if over == 1:
+                        logstr = "%s 超標" % (link)
+                        logf(data2['companyno'], data2['cmts_id'], logstr)
+
+                        oems_sid = 0
+                        sql = "select b.sid,b.status from oems_impact a \
+inner join oems_tickets_main b on b.sid=a.sid \
+where a.companyno = '%s' and a.type in ('NODE','LINK') and a.result='OK' and a.createtime >= sysdate-90 and a.node='%s' \
+and b.normal_flag in ('B','Y') and b.status in (5099,5124,5100,5101,5102,5103,5013) order by a.createtime desc" % (data2['companyno'], node)
+                        #print sql
+                        logf(data2['companyno'], data2['cmts_id'], sql)
+                        curO2.execute(sql)
+                        rowO2 = curO2.fetchall()
+                        if rowO2 is not None and len(rowO2) > 0:
+                            for col2 in rowO2:
+                                oems_sid = int(col2[0])
+                                oems_status = int(col2[1])
+                                alarm_node[node] = oems_sid
+                                alarm_sid[oems_sid] = oems_status
+                                break
+
+                        oems = 1 # 新增觀察
+                        for dd in alarm_node:
+                            #print '>',dd,link
+                            if dd in link:
+                                dd_sid = alarm_node[dd]
+                                if alarm_sid[dd_sid] == 5099 or alarm_sid[dd_sid] == 5124:
+                                    if not this_alarm.has_key(dd_sid):
+                                        oems = 2 # 升級為區障
+                                        logstr = "%s (%s,%d) 升級為區障" % (link, dd, dd_sid)
+                                        logf(data2['companyno'], data2['cmts_id'], logstr)
+
+                                        if dd_sid > 0:
+                                            updsql = "update oems_tickets_main set status='5100',event_date=sysdate where sid='%d'" % (dd_sid)
+                                            logf(data2['companyno'], data2['cmts_id'], updsql)
+                                            try:
+                                                curO2.execute(updsql)
+                                                oraO.commit()
+                                                #pass
+                                            except:
+                                                logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to update OEMS_TICKETS_MAIN')
+                                    else:
+                                        oems = 3 # 本次新增的觀察件, 下次才可升級為區障
+                                        logstr = "%s (%s,%d) 本次新增的觀察件, 暫不升級為區障" % (link, dd, dd_sid)
+                                        logf(data2['companyno'], data2['cmts_id'], logstr)
+                                else:
+                                    oems = 0 # 既有區障
+                                    logstr = "%s (%s,%d) 既有區障" % (link, dd, dd_sid)
+                                    logf(data2['companyno'], data2['cmts_id'], logstr)
+                                break
+
+                    if over == 1 and oems == 1:
+                        logstr = "%s 列入觀察" % (link)
+                        logf(data2['companyno'], data2['cmts_id'], logstr)
+
+                        # 新增障礙單
+                        oems_sid = 0
+                        if cc == 5:
+                            subtype = 310704
+                            nettype = 'NODE'
+                            link0   = link
+                        else:
+                            subtype = 310705
+                            nettype = 'LINK'
+                            link0   = link + str('00000')
+                            link0   = link0[0:12]
+                        if offline_rate >= 0:
+                            reason_str = "網點# %s 總數%d戶, 前次上線%d戶, 目前上線%d戶, 離線率已達%d%%" % (link0, total_num, prev_online, online_num, offline_rate)
+                        else:
+                            reason_str = "網點# %s 總數%d戶, 前次上線%d戶, 目前上線%d戶" % (link0, total_num, prev_online, online_num)
+                        impact_str = "%s-%s" % (data2['companyno'], link0)
+                        inssql = "begin insert into oems_tickets_main (status,type,subtype,reason,descr,create_date,operator,account,normal_flag,impact_list) \
+values('5099',3107,'%d','%s','%s',sysdate,'%s','COSSv2','B','%s') return to_char(sid) into :1 ; end;" % (subtype, reason_str, reason_str, so_name[data2['companyno']], impact_str)
+#                        inssql = "begin insert into oems_tickets_main (status,type,subtype,reason,descr,create_date,operator,account,normal_flag,impact_list,close_date) \
+#values('5125',3107,'%d','%s','%s',sysdate,'%s','COSSv2','B','%s',sysdate) return to_char(sid) into :1 ; end;" % (subtype, reason_str, reason_str, so_name[data2['companyno']], impact_str)
+                        logf(data2['companyno'], data2['cmts_id'], inssql)
+                        try:
+                            oems_sid_ary = oraO.BindingArray(1,12,'SQLT_STR')
+                            curO2.execute(inssql, oems_sid_ary)
+                            oraO.commit()
+                            oems_sid = int(oems_sid_ary[0])
+                            #pass
+                        except:
+                            logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to insert OEMS_TICKETS_MAIN')
+
+                        if oems_sid > 0:
+                            inssql = "insert into oems_impact (sid,type,value,companyno,node,area) values ('%d','%s','%s','%s','%s','%s')" % (oems_sid, nettype, link0, data2['companyno'], node, area)
+                            logf(data2['companyno'], data2['cmts_id'], inssql)
+                            try:
+                                curO2.execute(inssql)
+                                oraO.commit()
+                                #pass
+                            except:
+                                logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to insert OEMS_IMPACT')
+                        else:
+                            logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to insert OEMS_TICKETS_MAIN')
+
+                        alarm_node[link] = oems_sid
+                        alarm_sid[oems_sid] = 5099
+                        this_alarm[oems_sid] = 1
+
+                        # add 2014.03.31 觀察件的cm_online更新為prev_cm_online以利下次重新判斷是否為第2次符合離線率
+                        updsql = "update cmmac set cm_online=prev_cm_online where companyno='%s' and cmts_id='%s' and subsid is not null and link is not null and link like '_____-______%%' and link != 'ZZ999-999999' and substr(link,1,%d)='%s'"% (data2['companyno'], data2['cmts_id'], cc, link)
+                        logf(data2['companyno'], data2['cmts_id'], updsql)
+                        try:
+                            curC2.execute(updsql)
+                            oraC.commit()
+                            #pass
+                        except:
+                            logf(data2['companyno'], data2['cmts_id'], 'Except - Unable to update CMMAC')
+
+    if curC2:
+        curC2.close()
+    if curO2:
+        curO2.close()
+    logf(data2['companyno'], data2['cmts_id'], 'END')
+    sys.stdout.flush()
+
+DCOracle2.threadsafety = 2
+
+try:
+    oraC = DCOracle2.connect('NMS/SMN_123@CNIS')
+    curC = oraC.cursor()
+except Exception, msg:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate,'Error: Unable to connect to server [CNIS] -',str(msg)
+    sys.exit(0)
+
+if so == 'TFM':
+    so_str = "'101','103','104','300','701'"
+elif so == 'KBRO1':
+    so_str = "'210','220','230','240','250','260','106'"
+elif so == 'KBRO2':
+    so_str = "'310','330','410','420'"
+elif so == 'KBRO3':
+    so_str = "'610'"
+elif so == 'KBRO4':
+    so_str = "'810'"
+elif so == 'KBRO5':
+    so_str = "'820'"
+else:
+    so_str = "'%s'" % (so)
+
+cmts_info = []
+sql = "select a.companyno,a.cmts_id,a.ip,a.account,a.passwd,a.enpasswd, \
+       case \
+         when upper(b.maker||b.model) like '%%UBR%%' then 'UBR' when upper(b.maker||b.model) like '%%CBR%%' then 'UBR' \
+	 when upper(b.maker||b.model) like '%%CASA%%' then 'CASA' \
+	 when upper(b.maker||b.model) like '%%ARRIS%%' then 'ARRIS' \
+         when upper(b.maker||b.model) like '%%CUDA%%' then 'CUDA' when upper(b.maker||b.model) like '%%MOTO%%' then 'MOTO' else NULL end type \
+       from cmts a \
+       inner join sys_object b on b.ne_id=substr(a.cmts_id,-8,4) and b.stopyn='N' \
+       where a.companyno in (" + so_str + ") and a.ip is not NULL and a.passwd is not null and a.enpasswd is not null and a.stopyn='N' \
+       order by a.companyno,a.updatetime,a.createtime asc"
+print sql
+curC.execute(sql)
+rowC = curC.fetchall()
+if rowC is not None and len(rowC) > 0:
+    for col in rowC:
+        data = {}
+        data = {'companyno':col[0], 'cmts_id':col[1], 'ip':col[2], 'account':col[3], 'passwd':col[4], 'enpasswd':col[5], 'type':col[6]}
+        cmts_info.append(data)
+
+try:
+    oraO = DCOracle2.connect('OEMS/SMEO_123@KBRO_NMSDB')
+    curO = oraO.cursor()
+except Exception, msg:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate,'Error: Unable to connect to server [OEMS] -',str(msg)
+    sys.exit(0)
+
+kpi_offline1 = 100
+kpi_offline2 = 80
+sql = "select name,link_day,link_hour from kpi_coss_bomb where name in ('Offline') and stopyn='N'"
+curO.execute(sql)
+rowO = curO.fetchall()
+if rowO is not None and len(rowO) > 0:
+    for col in rowO:
+        try:
+            kpi_offline1 = int(col[1])
+            kpi_offline2 = int(col[2])
+        except:
+            kpi_offline1 = 100
+            kpi_offline2 = 80
+        break
+else:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate,'Error: 告警機制停用'
+    sys.exit(0)
+
+nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print nowdate,'離線率: 4~6戶 ' + str(kpi_offline1) + '%'
+print nowdate,'離線率: >=7戶 ' + str(kpi_offline2) + '%'
+
+so_name = {}
+sql = "select name,id from oems_mapping where name in (" + so_str + ") and type='OPERATOR' and name is not null and rank is not null"
+curO.execute(sql)
+rowO = curO.fetchall()
+if rowO is not None and len(rowO) > 0:
+    for col in rowO:
+        so_name[col[0]] = str(int(col[1]))
+
+op_str = "''"
+if so_name is not None and len(so_name) > 0:
+    op_str = "','".join(so_name.values())
+    op_str = "'%s'" % (op_str)
+
+nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+print nowdate,'SO Operator:',so_name
+sys.stdout.flush()
+
+if curC:
+    curC.close()
+    curC = None
+if curO:
+    curO.close()
+    curO = None
+
+duration = 60*15
+startime = time.time()
+oraC_retry = oraO_retry = 0
+thread_arr = {}
+run_count = 0
+
+while 1:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate,'check dblink [CNIS]'
+    try:
+        curC = oraC.cursor()
+        curC.execute('select companyno from so where rownum <= 1')
+        curC.close()
+        curC = None
+        oraC_retry = 0
+    except Exception, msg:
+        print nowdate,'Error: Lost connection to server [CNIS], trying to reconnect -',str(msg)
+        oraC = None
+        curC = None
+        try:
+            oraC = DCOracle2.connect('NMS/SMN_123@CNIS')
+            oraC_retry = 0
+        except Exception, msg:
+            oraC_retry = oraC_retry + 1
+            if oraC_retry >= 10:
+                print nowdate,'Error: Lost connection to server [CNIS], fail to retry [EXIT]'
+                break
+            else:
+                print nowdate,'Error: Unable to reconnect to server [CNIS] (' + oraC_retry + ')'
+                print nowdate,'WAIT 120 seconds'
+                sys.stdout.flush()
+                time.sleep(120)
+                continue
+
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate,'check dblink [OEMS]'
+    try:
+        curO = oraO.cursor()
+        curO.execute('select id from oems_mapping where rownum <= 1')
+        curO.close()
+        curO = None
+        oraO_retry = 0
+    except Exception, msg:
+        print nowdate,'Error: Lost connection to server [OEMS], trying to reconnect -',str(msg)
+        oraO = None
+        curO = None
+        try:
+            oraO = DCOracle2.connect('OEMS/SMEO_123@KBRO_NMSDB')
+            oraO_retry = 0
+        except Exception, msg:
+            oraO_retry = oraO_retry + 1
+            if oraO_retry >= 10:
+                print nowdate,'Error: Lost connection to server [OEMS], fail to retry [EXIT]'
+                break
+            else:
+                print nowdate,'Error: Unable to reconnect to server [OEMS] (' + oraO_retry + ')'
+                print nowdate,'WAIT 120 seconds'
+                sys.stdout.flush()
+                time.sleep(120)
+                continue
+
+    run_count = run_count + 1
+
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate,'MAIN START',' (',run_count,')'
+
+    for data in cmts_info:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print nowdate,data
+
+        thread_arr[data['cmts_id']] = threading.Thread(target = query_cmts, args = (data.items()))
+        thread_arr[data['cmts_id']].start()
+        time.sleep(15)
+
+    for data in cmts_info:
+        thread_arr[data['cmts_id']].join()
+
+    endtime = time.time()
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print "%s MAIN END (totalsec: %d)\n" % (nowdate, endtime-startime)
+    sys.stdout.flush()
+
+    # 刪除過期的觀察區 START
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print nowdate,'check dblink for delete status=5099,5124 [OEMS]'
+    try:
+        curO = oraO.cursor()
+        curO.execute('select id from oems_mapping where rownum <= 1')
+    except Exception, msg:
+        print nowdate,'Error: Lost connection to server [OEMS], trying to reconnect -',str(msg)
+        oraO = None
+        curO = None
+        try:
+            oraO = DCOracle2.connect('OEMS/SMEO_123@KBRO_NMSDB')
+            curO = oraO.cursor()
+        except Exception, msg:
+            print nowdate,'Error: Unable to reconnect to server [OEMS]'
+
+    if curO:
+        sql = "select sid from oems_tickets_main where create_date < sysdate-(%d/86400) and status in ('5099','5124') and type='3107' and subtype in ('310704','310705') and operator in (%s)" % (duration, op_str)
+        print sql
+        curO.execute(sql)
+        rowO = curO.fetchall()
+        if rowO is not None and len(rowO) > 0:
+            for col in rowO:
+                xsid = int(col[0])
+                delsql  = "update oems_tickets_main set status='5125' where sid = '%d'" % (xsid)
+                delsql2 = "delete from oems_tickets_log where sid = '%d'" % (xsid)
+                #delsql3 = "delete from oems_impact where sid = '%d'" % (xsid)
+                delsql4 = "delete from oems_impact_subscrid where sid = '%d'" % (xsid)
+                print delsql
+                print delsql2
+                #print delsql3
+                print delsql4
+                try:
+                    curO.execute(delsql)
+                    curO.execute(delsql2)
+                    #curO.execute(delsql3)
+                    curO.execute(delsql4)
+                    oraO.commit()
+                    #pass
+                except:
+                    print nowdate,'Except - Unable to delete OEMS_TICKETS_MAIN/OEMS_TICKETS_LOG/OEMS_IMPACT/OEMS_IMPACT_SUBSCRID'
+        curO.close()
+        curO = None
+        print ''
+    sys.stdout.flush()
+    # 刪除過期的觀察區 END
+
+    while (endtime-startime) < duration:
+        nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+        print '%s WAIT 30 seconds %d %d %d (%d)' % (nowdate, endtime, startime, endtime-startime, duration)
+        sys.stdout.flush()
+        time.sleep(30)
+        endtime = time.time()
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    startime = time.time()
+    print "%s NEXT" % (nowdate)
+
+    #if run_count >= 2:
+    #    break
+
+if curC:
+    curC.close()
+    curC = None
+if oraC:
+    oraC.close()
+    oraC = None
+if curO:
+    curO.close()
+    curO = None
+if oraO:
+    oraO.close()
+    oraO = None
+sys.exit(0)

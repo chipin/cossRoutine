@@ -1,0 +1,15 @@
+#!/usr/bin/bash
+. /ap/home/coss/.bash_profile
+
+cd /ap/home/coss/bin/cm2
+
+progname="sync_coss_twm.py"
+logname="/ap/home/coss/log/sync_coss_twm.log"
+
+rfg=`ps -ef | grep "${progname}" | grep "python"`
+if [ "$rfg" != "" ]; then
+    echo "`date` INFO : ${progname} is already running"
+else
+    ./${progname} > ${logname} 2>&1 &
+    echo "`date` INFO : ${progname} is runnung now"
+fi

@@ -1,0 +1,319 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+# 10.22.111.11 : 60002
+import os,sys,time,socket,select
+from oraclass import ORA
+from cagw_func import CAGW_FUNC
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+sourceid = 16
+
+oracon = None
+oracon = ORA('coss@kbro_nmsdb')
+if oracon.db is None:
+    nowdate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+    print '['+nowdate+'] ERROR: Unable to connect to DB [KBRO_NMSDB]'
+    sys.exit(0)
+
+init_seq = -1
+sql = "select seq from cagw_seq where sourceid='%d'" % (sourceid)
+rst = oracon.execall(sql)
+if rst is not None and len(rst) > 0:
+    for a_row in rst:
+        init_seq = a_row[0]
+oracon.se_close()
+
+if init_seq<0:
+    init_seq = 110000000
+
+print "init seq: %.9d" % (init_seq)
+
+querySql = "select sid,icc_no,stb_no,cmd,bg_date,end_date,channel,mail,tune,networkid,product_name,ppvdate from v_cagw_queue_seq where rownum=1"
+
+xca_cmd = ''
+xca_ret = ''
+cafunc = CAGW_FUNC(sourceid, 'emm', init_seq)
+recv_buffer_length = 40960
+
+def gw_open(host, port=59001):
+    msg = "getaddrinfo returns an empty list"
+    for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        try:
+            sock = socket.socket(af, socktype, proto)
+            sock.connect(sa)
+        except socket.error, msg:
+            if sock:
+                sock.close()
+            sock = None
+            print "gw_open() error: %s" % (str(msg))
+            time.sleep(5)
+            continue
+        break
+    if not sock:
+        raise socket.error, msg
+    return sock
+
+def gw_read(tn):
+    buf = None
+    r, w, e = select.select([tn], [], [], 0.5)
+    if r == []:
+        return None
+    try:
+        buf = tn.recv(recv_buffer_length)
+        #cafunc.prn_data(buf)
+    except Exception, msg:
+        print 'gw_read(): '+str(msg)
+        return 'ERROR'
+    return buf
+
+def gw_send(tn, s):
+    try:
+        buf = chr(0)+chr(len(s))+s
+        tn.send(buf)
+        #cafunc.prn_data(buf)
+    except Exception, msg:
+        print 'gw_send(): '+str(msg)
+        return -1
+    return 1
+
+def login(tn):
+    obname = "KBRO_CAGWD3"
+    buf = chr(0)+chr(len(obname)+2)+chr(0x0)+chr(0xb)+obname
+    tn.send(buf)
+    #cafunc.prn_data(buf)
+    rst = gw_read(tn)
+
+    loop = 0
+    while rst is None and loop<30:
+        time.sleep(1)
+        rst = gw_read(tn)
+        loop = loop+1
+    print rst
+    if rst is not None and rst[2]==chr(0x06):
+        rst = gw_read(tn)
+        print rst
+        loop = 0
+        while rst is None and loop<30:
+            time.sleep(1)
+            rst = gw_read(tn)
+            loop = loop+1
+        if rst is not None and rst[2]==chr(0x0):
+            return 1
+    elif rst=='ERROR':
+        return -1
+    return -1
+
+def ora_upd(ora, sid, status, result=None, ca_cmd=None, ca_ret=None):
+    try:
+        result_sql = ''
+        if result is not None:
+            result_sql = ",result='%s'" % (result)
+        cacmd_sql = ''
+        if ca_cmd is not None:
+            cacmd_sql = ",ca_cmd='%s'" % (ca_cmd)
+        caret_sql = ''
+        if ca_ret is not None:
+            caret_sql = ",ca_ret='%s'" % (ca_ret)
+        sql = "update cagw_queue_d3 set status='%s'%s%s%s,update_date=sysdate where sid=%d" % (status, result_sql, cacmd_sql, caret_sql, int(sid))
+        #print sql
+        ora.execone(sql)
+        ora.commit()
+    except Exception, msg:
+        print msg
+
+def main():
+    global sourceid
+    oracon = None
+    sock = None
+    nop_flag = 0
+    try:
+        nowdate = time.strftime("%Y%m%d", time.localtime())
+        while 1:
+            try:
+                data_flag = 0
+                if nop_flag>0:
+                    nop_flag = 0
+                if sock is None:
+                    sock = gw_open("10.22.111.11",60002)
+                    if sock is None:
+                        time.sleep(5)
+                        continue
+                    if login(sock)<=0:
+                        sock.close()
+                        sock = None
+                        time.sleep(5)
+                        continue
+                if oracon is None:
+                    oracon = ORA('coss@kbro_nmsdb')
+                rs = None
+                if oracon.cexist():
+                    rs = oracon.execall(querySql)
+                    if rs is not None and len(rs) > 0:
+                        print "%s cnt=%d" %(time.strftime("%Y/%m/%d %H:%M:%S", time.localtime()), len(rs))
+                        data_flag = 1
+                        for a_row in rs:
+                            sid = a_row[0]
+                            icc_no = a_row[1]
+                            stb_no = a_row[2]
+                            cmd = a_row[3]
+                            bg_date = a_row[4]
+                            end_date = a_row[5]
+                            mail = a_row[7]
+                            tune = a_row[8]
+                            networkid = a_row[9]
+                            prodname = a_row[10]
+                            ppvdate = a_row[11]
+                            if stb_no is None:
+                                stb_no = '0000000000'
+                            channel = "%.12d" % int(a_row[6])
+                            if cmd=='E3':
+                                resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 0)
+                            elif cmd=='E3E':
+                                resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 0, 2)
+                            elif cmd=='E3P':
+                                resp = cafunc.gw_mail_by_profile(sid, bg_date, end_date, icc_no, mail, 0, '1')
+                            elif cmd=='E7':
+                                resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 1)
+                            elif cmd=='E7P':
+                                resp = cafunc.gw_mail_by_profile(sid, bg_date, end_date, icc_no, mail, 1, '1')
+                            elif cmd=='E7N':
+                                resp = cafunc.gw_mail_by_nid(sid, bg_date, end_date, str(networkid), mail)
+                            elif cmd=='E7NP':
+                                resp = cafunc.gw_mail_by_nid_by_profile(sid, bg_date, end_date, str(networkid), mail, '1')
+                            elif cmd=='E8':
+                                resp = cafunc.gw_mail(sid, bg_date, end_date, icc_no, mail, 0)
+                            elif cmd=='E8P':
+                                resp = cafunc.gw_mail_by_profile(sid, bg_date, end_date, icc_no, mail, 0, '1')
+                            elif cmd=='A3':
+                                resp = cafunc.gw_repack_icc(sid, ppvdate, end_date, icc_no, stb_no)
+                            else:
+                                resp = -2
+                            if resp<0:
+                                print '[Error]: %d, %s' % (resp, sid)
+                            sys.stdout.flush()
+
+                        # Sending commands to CA Gateway
+                        x, y, z, idx, key = cafunc.seek_q(1)
+                        while x is not None:
+                            try:
+                                nop_flag = 1
+                                print y
+                                if gw_send(sock, y)>0:
+                                    cafunc.upd_q(idx, 2)
+                                    ora_upd(oracon, key, 'SENT', None, y)
+                                    recv_str = None
+                                    while recv_str is None:
+                                        time.sleep(0.1)
+                                        recv_str = gw_read(sock)
+                                    print x, recv_str
+                                    #time.sleep(3)
+                                    sys.stdout.flush()
+                                    if recv_str is not None:
+                                        maxlen = len(recv_str)
+                                        nop_flag = 1
+                                        ofs = 0
+                                        while ofs<maxlen:
+                                            xlen = ord(recv_str[ofs+1])
+                                            x = recv_str[ofs+2:ofs+2+xlen]
+                                            sid = x[36:45]
+                                            idx = cafunc.mapping_idx(sid)
+                                            cafunc.rcv_q(idx, x)
+                                            cafunc.upd_q(idx, 3)
+                                            ofs = ofs+xlen+2
+                                x, y, z, idx, key = cafunc.seek_q(1)
+                            except Exception, msg:
+                                print msg
+                            sys.stdout.flush()
+                    else:
+                        print ".",
+                else:
+                    print "%s Reconnect" % time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+                sys.stdout.flush()
+
+                #cafunc.print_q()
+                # Update Result
+                x, y, z, idx, key = cafunc.seek_q(-1)
+                x, y, z, idx, key = cafunc.seek_q(3)
+                while x is not None:
+                    try:
+                        nop_flag = 1
+                        print "%s, %d> %s" % (x, idx, z)
+                        sys.stdout.flush()
+                        cafunc.upd_q(idx, 0)
+                        result_str = cafunc.gw_msg(z)
+                        ora_upd(oracon, key, 'OK', result_str, None, z)
+                        x, y, z, idx, key = cafunc.seek_q(3)
+                    except Exception, msg:
+                        print msg
+                    sys.stdout.flush()
+
+                if nop_flag==0:
+                    x, y, z, idx, key = cafunc.seek_q(-1)
+                    x, y, z, idx, key = cafunc.seek_q(1)
+                    if x is not None:
+                        nop_flag = 1
+                    else:
+                        x, y, z, idx, key = cafunc.seek_q(-1)
+                        x, y, z, idx, key = cafunc.seek_q(2)
+                        if x is not None:
+                            nop_flag = 1
+                        else:
+                            x, y, z, idx, key = cafunc.seek_q(-1)
+                            x, y, z, idx, key = cafunc.seek_q(3)
+                            if x is not None:
+                                nop_flag = 1
+
+                if nop_flag<=0:
+                    nop_flag = nop_flag-1
+                if nop_flag<=-10:
+                    print "[Keep-alive]"
+                    cmdstr = cafunc.gw_keepalive(nowdate)
+                    gw_send(sock, cmdstr)
+                    read_str = None
+                    while read_str is None:
+                        read_str = gw_read(sock)
+                        time.sleep(0.3)
+                    nop_flag = 0
+                    time.sleep(2)
+                if data_flag==0:
+                    time.sleep(10)
+                else:
+                    sql = "update cagw_seq set seq='%d' where sourceid=%d" % (cafunc.seqid, sourceid)
+                    oracon.execone(sql)
+                    oracon.commit()
+                sys.stdout.flush()
+                oracon.se_close()
+                oracon = None
+            except Exception, msg:
+                print 'Error: '+str(msg)
+                try:
+                    oracon.se_close()
+                except:
+                    pass
+                oracon = None
+                if sock:
+                    try:
+                        sock.close()
+                    except:
+                        pass
+                    sock = None
+                time.sleep(5)
+        if oracon:
+            oracon.se_close()
+            oracon = None
+        if sock:
+            sock.close()
+            sock = None
+    except KeyboardInterrupt:
+        oracon.se_close()
+        sock.close();
+        print "Interrupt...\n"
+        exit
+
+if __name__ == "__main__":
+    main()

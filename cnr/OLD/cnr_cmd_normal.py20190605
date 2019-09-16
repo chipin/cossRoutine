@@ -1,0 +1,335 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 中文字編碼
+# CMMAC: xxxSTB   CPEMAC: xxxSTBdefault
+# CMMAC: xxxTV10M CPEMAC: xxxTVSTB
+# CMMAC: xxxCPzz  CPEMAC: xxxMTA-yy
+import os,sys,time,string,re
+from oraclass import ORA
+import pexpect
+from cnr_cmd_class import CnrBackup
+
+reload(sys)
+sys.setdefaultencoding('utf8')
+os.environ["NLS_LANG"] = 'AMERICAN_AMERICA.UTF8'
+
+############################################
+# 主要函式
+############################################
+def getDatetime():
+    return time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
+
+def get_ipusage(cnr_shell,ora):
+    try:
+        _result_str = ''
+        _result_str = cnr_shell.sendCnrShell('report')
+        if  _result_str.find("100 Ok") >= 0:
+            array_data = _result_str.splitlines()
+            for s in array_data:
+                s = string.strip(s)
+                array_line = string.split(s)
+                if  (len(array_line)==16 and int(array_line[1])>16 and int(array_line[1])<32 and array_line[4]!='LeaseQuery'):
+                    scope    = array_line[4]
+                    used     = int(array_line[6]) - int(array_line[8])
+                    free     = array_line[8]
+                    reserved = array_line[9]
+                    #print 'Scope: ' + array_line[4] + ', Used: ' + array_line[6] + '=' + array_line[8] + '+' + str(used) + ', Free: ' + free + ', Reserved: ' + reserved
+                    if  len(scope) > 0:
+                        updateSql = "UPDATE cnr_scope_iprange SET used='%d',used_updtime=sysdate,free='%s',reserved='%s' WHERE scope = '%s'" % (used,free,reserved,scope)
+                        print updateSql
+                        ora.execone(updateSql)
+                        ora.commit()
+            print '[success]get_ipusage()-OK'
+            return 1
+        else:
+            print '[Error]get_ipusage()-FAIL'
+            return -1
+    except Exception, e:
+        print '[Exception]get_ipusage()-error: '+str(e)
+        return -2
+
+def addfixip_to_search_NewIP(cnr_shell,cmd,ip,cpemac,sid):
+    if  cmd=='addfixip':
+        cnr_shell.addfixip('',ip,cpemac,sid)
+    elif cmd=='addfixip2' or cmd=='addnatip':
+        cnr_shell.addfixip('',ip,cpemac,sid,cmd)
+    elif cmd == 'delfixip':
+        cnr_shell.delfixip(ip,'',sid)
+    elif cmd=='deactiveip':
+        cnr_shell.deactiveip(ip,sid)
+    elif cmd=='activeip':
+        cnr_shell.activeip(ip,sid)
+    else:
+        print '[%s][Error]Unknown command'%(getDatetime())
+        sys.stdout.flush()
+
+def addfixip_no_search_NewIP(cnr_shell,cmd,ip,cpemac,policy,result,sid):
+    if  cmd=='addfixip':
+        if  result.find("cpemac重覆綁定")>=0:
+            msg = '[%s]該cpemac重覆綁定'%(cmd)
+            cnr_shell.result_upt_db('OK',msg,sid)
+        else:
+            scopename = re.match(r"scope(.+)addReservation",result).group(1)
+            cnr_shell.addfixip(scopename,ip,cpemac,sid)
+    elif cmd=='addfixip2' or cmd=='addnatip':
+        if  result.find("cpemac重覆綁定")>=0:
+            msg = '[%s]該cpemac重覆綁定'%(cmd)
+            cnr_shell.result_upt_db('OK',msg,sid)
+        else:
+            newscope = re.match(r"scope(.+)addReservation",result).group(1)
+            newip    = policy
+            cnr_shell.addfixip(newscope,newip,cpemac,sid,cmd)
+    elif cmd == 'delfixip':
+        scopename = re.match(r"scope(.+)remove",result).group(1)
+        cnr_shell.delfixip(ip,scopename,sid)
+    elif cmd=='deactiveip':
+        cnr_shell.deactiveip(ip,sid)
+    elif cmd=='activeip':
+        cnr_shell.activeip(ip,sid)
+    else:
+        print '[%s][Error]Unknown command'%(getDatetime())
+        sys.stdout.flush()
+
+def cnr_command(cnr_shell,sid,cmd,cmmac,policy,ip,cpemac,subsid):
+    if  cmd=='querymac':
+        cnr_shell.querymac(ip,sid)
+    elif cmd=='querybw':
+        cnr_shell.querybw(cmmac,sid)
+    elif cmd=='active':
+        cnr_shell.active(cmmac,policy,sid)
+    elif cmd=='modify':
+        cnr_shell.modify(cmmac,policy,sid)
+    elif cmd=='delete':
+        cnr_shell.delete(cmmac,sid)
+    elif cmd=='ddos':
+        cnr_shell.ddos(cpemac,sid)
+    elif cmd=='delddos':
+        cnr_shell.delddos(cpemac,sid)
+    elif cmd=='addcmbsn':
+        cnr_shell.addcmbsn(cmmac,policy,subsid,sid)
+    elif cmd=='fixpublic':
+        addTag = 'Scope-PUB'
+        cnr_shell.fixpublic(cpemac,addTag,sid)
+    elif cmd=='fixprivate':
+        cnr_shell.fixprivate(cpemac,policy,sid)
+    elif cmd=='addtagscope':
+        addTag = policy
+        cnr_shell.fixpublic(cpemac,addTag,sid)
+    elif cmd=='deltagscope':
+        cnr_shell.fixprivate(cpemac,policy,sid)
+    else:
+        print '[%s][Error]Unknown command'%(getDatetime())
+        sys.stdout.flush()
+
+def main(cnrID,execType,cmdType,production,testSidArr,execSql):
+    ##########
+    # 測試 DB 連線
+    ##########
+    oracon = None
+    for i in range(4):
+        oracon = ORA('nms@cnis')
+        if  oracon is not None:
+            break
+        else:
+            print '[%s][Error] Unable to connect to DB'%(getDatetime())
+            sys.stdout.flush()
+            time.sleep(10)
+    if  oracon is None:
+        sys.exit(0)
+    ##########
+    # 連線 table cnr 
+    ##########
+    if  production:
+        sql = "SELECT companyno,cnr_id,cnr_id2,ip,ip2,apiuser,apipwd,ip4,cnr_flag FROM cnr WHERE stopyn='N' AND (cnr_id='%s' or cnr_id2='%s') AND ip IS NOT NULL"%(cnrID,cnrID)
+    else:
+        # 測試
+        sql = "SELECT companyno,cnr_id,cnr_id2,ip,ip2,apiuser,apipwd,ip4,cnr_flag FROM cnr WHERE stopyn='N' AND (cnr_id='%s' or cnr_id2='%s') AND ip IS NOT NULL"%(cnrID,cnrID)
+        print '[sql]',sql
+        sys.stdout.flush()
+    try:
+        rst = oracon.execall(sql)
+        so=cnrid=cnrid2=cnrip=cnrip2=uid=pwd=backupIp=cnrType=None
+        if  rst is not None and len(rst)>0:
+            aw = rst[0]
+            so,cnrid,cnrid2,cnrip,cnrip2,uid,pwd,backupIp,cnrType = aw[0],aw[1],aw[2],aw[3],aw[4],aw[5],aw[6],aw[7],int(aw[8])
+    except Exception, msg:
+        print '[%s][Exception]Unable to connect table cnr：%s'%(getDatetime(),str(msg))
+        sys.stdout.flush()
+        sys.exit(0)
+    ##########
+    # 連線 CNR：若無法連線則 exit
+    ##########
+    cnr_shell = None
+    if  cnrip is None or so is None or uid is None or pwd is None:
+        print '[%s][Error]cnrip is None'%(getDatetime())
+        oracon.se_close()
+        sys.exit(0)
+    connIP = cnrip if(execType=='MASTER') else backupIp
+    if  connIP is None:
+        print '[%s][Error]Unable to connect table cnr-%s(ip=%s)'%(getDatetime(),execType,connIP)
+        sys.exit(0)
+    cnr_shell = CnrBackup('cnr',connIP,execType,uid,pwd,production,execSql)
+    if  cnr_shell.connect==False:
+        # [Error]Unable to connect cnr
+        oracon.se_close()
+        sys.exit(0)
+    ##########
+    # 連線 table cnr_queue 每次撈取30筆command 
+    ##########
+    if  execType=='MASTER':
+        # MASTER
+        if  cnrType==1:
+            # 搜尋newip,newscopename
+            where1 = "and status='INIT'"
+            where2 = "and backup_status='INIT'"
+        else:
+            # 不搜尋newip,newscopename，依現有資料執行cnr(policy,result,backup_result)
+            where1 = "and status='INIT'"
+            where2 = "and backup_status='OK'"
+    else:
+        # SLAVE
+        if  cnrType==2:
+            # 搜尋newip,newscopename
+            where1 = "and status='INIT'"
+            where2 = "and backup_status='INIT'"
+        else:
+            # 不搜尋newip,newscopename，依現有資料執行cnr(policy,result,backup_result)
+            where1 = "and status='OK'"
+            where2 = "and backup_status='INIT'"
+    # for addfixip..(共4種cmd) or querymac(共14種cmd)
+    where3 = "'addfixip','addfixip2','delfixip','addnatip','deactiveip','activeip'" if(cmdType=='FIXEDIP') else "'querymac','querybw','active','modify','delete','ddos','delddos','addcmbsn','fixpublic','fixprivate','addtagscope','deltagscope'"
+    if  so in ['810','820'] or cnrid in ['KS_CNR1_001','PN_CNR1_001','KS-CNR-01','PN-CNR-01'] or cnrid2 in ['KS_CNR1_001','PN_CNR1_001','KS-CNR-01','PN-CNR-01']:
+        querySQL = '''select sid,command,cmmac,policy,ip,cpemac,companyno,subsid,status,result,backup_status,backup_result from (select sid,command,cmmac,policy,ip,cpemac,companyno,subsid,status,result,backup_status,backup_result from cnr_queue where (companyno in ('810','820') or cnr_id in ('KS-CNR-01','PN-CNR-01','KS_CNR1_001','PN_CNR1_001')) %s %s and command IN(%s) and sysdate >= book_date order by book_date,sid) where rownum <= 30'''%(where1,where2,where3)
+    elif so == '240' or cnrid in ['DA_CNR1_001','WS_CNR1_001','DW-CNR-01','DW-CNR-02'] or cnrid2 in ['DA_CNR1_001','WS_CNR1_001','DW-CNR-01','DW-CNR-02']:
+        querySQL = '''select sid,command,cmmac,policy,ip,cpemac,companyno,subsid,status,result,backup_status,backup_result from (select sid,command,cmmac,policy,ip,cpemac,companyno,subsid,status,result,backup_status,backup_result from cnr_queue where cnr_id in ('%s','%s') %s %s and command IN(%s) and sysdate >= book_date order by book_date,sid) where rownum <= 30'''%(cnrid,cnrid2,where1,where2,where3)
+    else:
+        querySQL = '''select sid,command,cmmac,policy,ip,cpemac,companyno,subsid,status,result,backup_status,backup_result from (select sid,command,cmmac,policy,ip,cpemac,companyno,subsid,status,result,backup_status,backup_result from cnr_queue where (companyno='%s' or cnr_id in ('%s','%s')) %s %s and command IN(%s) and sysdate >= book_date order by book_date,sid) where rownum <= 30'''%(so,cnrid,cnrid2,where1,where2,where3)
+    # 測試
+    if  production is None:
+        querySQL = '''
+        select sid,command,cmmac,policy,ip,cpemac,companyno,subsid,status,result,backup_status,backup_result
+          from cnr_queue 
+         where sid IN(%s)
+         order by sid
+        '''%(testSidArr)
+    print '[sql]',querySQL
+    sys.stdout.flush()
+    cnr_loop     = 0
+    ipusage_flag = []
+    while 1:
+        try:
+            oracon.execone('select sysdate from dual')
+        except Exception, msg:
+            print '[%s][Exception]Unable to select sysdate from dual：%s'%(getDatetime(),str(msg))
+            for i in range(4):
+                oracon = ORA('nms@cnis')
+                if  oracon is not None:
+                    break
+                else:
+                    print '[%s][Error]Unable to connect to DB'%(getDatetime())
+                    sys.stdout.flush()
+                    time.sleep(10)
+        if  oracon is None:
+            sys.exit(0)
+
+        try:
+            idx = 1
+            rst = oracon.execall(querySQL)
+            if  rst is not None and len(rst)>0:
+                for aw in rst:
+                    try:
+                        sid           = int(aw[0])
+                        cmd           = aw[1]
+                        cmmac         = aw[2]
+                        policy        = aw[3]
+                        ip            = aw[4]
+                        cpemac        = aw[5]
+                        companyno     = aw[6]
+                        subsid        = int(aw[7]) if aw[7] is not None else ''
+                        status        = aw[8]
+                        main_result   = aw[9]
+                        backup_status = aw[10]
+                        backup_result = aw[11]
+                        print '\n[%s][sid=%d][cnrLoop-%s-%s][cmd=%s]：'%(getDatetime(),sid,str(cnr_loop),str(idx),cmd),cmmac,policy,ip,cpemac,so,subsid
+                        sys.stdout.flush()
+                        if  cmdType=='FIXEDIP':
+                            # FIXEDIP
+                            if  execType=='MASTER':
+                                # MASTER
+                                if  cnrType==1:
+                                    # 由 master 搜尋newip,newscopename
+                                    addfixip_to_search_NewIP(cnr_shell,cmd,ip,cpemac,sid)
+                                else:
+                                    # 不搜尋newip,newscopename，依現有資料執行cnr(policy,backup_result)
+                                    addfixip_no_search_NewIP(cnr_shell,cmd,ip,cpemac,policy,backup_result,sid)
+                            else:
+                                # SLAVE
+                                if  cnrType==2:
+                                    # 由 slave 搜尋newip,newscopename
+                                    addfixip_to_search_NewIP(cnr_shell,cmd,ip,cpemac,sid)
+                                else:
+                                    # 不搜尋newip,newscopename，依現有資料執行cnr(policy,main_result)
+                                    addfixip_no_search_NewIP(cnr_shell,cmd,ip,cpemac,policy,main_result,sid)
+                        else:
+                            # NORMAL
+                            cnr_command(cnr_shell,sid,cmd,cmmac,policy,ip,cpemac,subsid)
+                    except Exception, msg:
+                        print '[%s][Exception]while cnr_loop=%s-%s：%s'%(getDatetime(),str(cnr_loop),str(idx),str(msg))
+                    idx+=1
+            else:
+                # cnr_queue 無資料時，cmdType=NORMAL => 才執行IP使用率-每次只執行乙次
+                if  cmdType=='NORMAL':
+                    if  (execType=='MASTER' and cnrType==1) or (execType=='SLAVE' and cnrType==2):
+                        today = time.strftime("%Y%m%d",time.localtime())
+                        if  today not in ipusage_flag:
+                            result = get_ipusage(cnr_shell,oracon)
+                            if  result>0:
+                                ipusage_flag.append(today)
+                print '.',
+                sys.stdout.flush()
+        except Exception, msg:
+            print '[%s][Exception]cnr_loop=%s：%s'%(getDatetime(),str(cnr_loop),str(msg))
+            sys.stdout.flush()
+        # cnr每連接50次後，關閉再重啟
+        if  production:
+            # 正式
+            time.sleep(10)
+            cnr_loop+=1
+            if  cnr_loop%50==0:
+                print '[%s][Error]CNR execute limit reached[%s]'%(getDatetime(),str(cnr_loop))
+                sys.stdout.flush()
+                if  cnr_shell is not None:
+                    del cnr_shell
+                    cnr_shell = None
+                    cnr_shell = CnrBackup('cnr',connIP,execType,uid,pwd,production,execSql)
+        else:
+            # 測試
+            sys.exit(0)
+
+############################################
+# 程式開始
+# python cnr_cmd.py CT_CNR1_001 master fixedip
+# python cnr_cmd.py CT_CNR1_001 slave  fixedip
+# python cnr_cmd.py CT_CNR1_001 master normal
+# python cnr_cmd.py CT_CNR1_001 slave  normal
+############################################
+production = True # True None
+execSql    = True # True None
+testSidArr = "'22694206'"
+if  len(sys.argv)!=4:
+    print '[Error]usage:',sys.argv[0],'CNR ID,master/slave,fixedip/normal'
+    sys.exit(0)
+cnrID    = sys.argv[1].upper()
+execType = sys.argv[2].upper()
+cmdType  = sys.argv[3].upper()
+try:
+    main(cnrID,execType,cmdType,production,testSidArr,execSql)
+except KeyboardInterrupt, e: 
+    # Ctrl-C
+    raise e
+except SystemExit, e: 
+    # sys.exit()
+    raise e
+except Exception, e:
+    print '[%s][Exception]%s'%(getDatetime(),str(e))
+    sys.exit()
